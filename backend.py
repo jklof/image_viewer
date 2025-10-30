@@ -13,7 +13,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 DB_PATH = "images.db"
-MAX_SEARCH_RESULTS = 50
+# --- REMOVED --- The hardcoded search limit is now controlled by the UI.
+# MAX_SEARCH_RESULTS = 50
 
 class BackendWorker(QObject):
     """
@@ -52,20 +53,24 @@ class BackendWorker(QObject):
             logger.error("-------------------------------------------------")
             self.error.emit(traceback.format_exc())
 
-    @Slot(str)
-    def perform_text_search(self, query: str):
+    # --- MODIFIED --- Slot now accepts an integer for the number of results.
+    @Slot(str, int)
+    def perform_text_search(self, query: str, top_k: int):
         if not self.db: return
-        logger.info(f"Performing text search for: '{query}'")
+        logger.info(f"Performing text search for: '{query}' with top_k={top_k}")
         self.status_update.emit(f"Searching for: '{query}'...")
-        results = self.db.search_by_text(text_query=query, top_k=MAX_SEARCH_RESULTS)
+        # --- MODIFIED --- Pass the top_k value from the UI to the database search.
+        results = self.db.search_by_text(text_query=query, top_k=top_k)
         self.results_ready.emit(results)
 
-    @Slot(str)
-    def perform_image_search(self, image_path: str):
+    # --- MODIFIED --- Slot now accepts an integer for the number of results.
+    @Slot(str, int)
+    def perform_image_search(self, image_path: str, top_k: int):
         if not self.db: return
-        logger.info(f"Performing image search for: {image_path}")
+        logger.info(f"Performing image search for: {image_path} with top_k={top_k}")
         self.status_update.emit(f"Searching for images similar to {Path(image_path).name}...")
-        results = self.db.search_similar_images(image_path=image_path, top_k=MAX_SEARCH_RESULTS)
+        # --- MODIFIED --- Pass the top_k value from the UI to the database search.
+        results = self.db.search_similar_images(image_path=image_path, top_k=top_k)
 
         self.results_ready.emit(results)
     

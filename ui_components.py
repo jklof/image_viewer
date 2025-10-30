@@ -1,106 +1,125 @@
 # ui_components.py
 
 from pathlib import Path
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QFrame, QMenu, QApplication
-from PySide6.QtGui import QPixmap, QAction
-from PySide6.QtCore import Qt, QSize, Signal
-from PIL import Image
+from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+# --- UPDATED IMPORT: Added QPalette ---
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QFont, QColor, QPalette
+from PySide6.QtCore import Qt, QSize, QRect
 
-THUMBNAIL_SIZE = 200
+# The size of the icon/thumbnail we will generate and display
+THUMBNAIL_SIZE = 150 
+# The total size of each item in the grid, allowing for padding
+ITEM_WIDTH = 180
+ITEM_HEIGHT = 210
 
-class SearchResultWidget(QWidget):
-    """A widget to display a single image search result with a context menu."""
+# Custom data roles to store our specific data in the model
+FILEPATH_ROLE = Qt.ItemDataRole.UserRole + 1
+SCORE_ROLE = Qt.ItemDataRole.UserRole + 2
 
-    find_similar_requested = Signal(str)
+def create_list_item(score: float, filepath: str):
+    """
+    Helper function to create a QStandardItem with an icon and our custom data.
+    This replaces the need for a full QWidget for each result.
+    """
+    from PySide6.QtGui import QStandardItem
+    
+    # Create the item and set its icon
+    pixmap = QPixmap(filepath).scaled(
+        THUMBNAIL_SIZE, THUMBNAIL_SIZE, 
+        Qt.AspectRatioMode.KeepAspectRatio, 
+        Qt.TransformationMode.SmoothTransformation
+    )
+    item = QStandardItem(QIcon(pixmap), "") # Text is drawn by the delegate
+    
+    # Make the item non-editable and non-selectable by text
+    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+    
+    # Store our custom data in the item using the defined roles
+    item.setData(filepath, FILEPATH_ROLE)
+    item.setData(score, SCORE_ROLE)
+    
+    return item
 
-    def __init__(self, score: float, filepath: str):
-        super().__init__()
-        self.filepath = filepath
-        self.score = score
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
+class SearchResultDelegate(QStyledItemDelegate):
+    """
+    A custom delegate to control the rendering of each item in the QListView.
+    This class is responsible for drawing the thumbnail, score, and filename.
+    """
+    def sizeHint(self, option, index):
+        """Returns the size of each item."""
+        return QSize(ITEM_WIDTH, ITEM_HEIGHT)
 
-        # --- Thumbnail ---
-        self.thumbnail_label = QLabel()
-        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumbnail_label.setFixedSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
-        self.thumbnail_label.setStyleSheet("background-color: #2c313c; border-radius: 5px;")
+    def paint(self, painter: QPainter, option, index):
+        """
+        Paints the contents of a single item.
+        """
+        painter.save()
+
+        # --- Get Data ---
+        filepath = index.data(FILEPATH_ROLE)
+        score = index.data(SCORE_ROLE)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
         
-        try:
-            with Image.open(filepath) as img:
-                img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE), Image.Resampling.LANCZOS)
-                q_img = img.toqpixmap()
-                self.thumbnail_label.setPixmap(q_img)
-        except Exception as e:
-            self.thumbnail_label.setText(f"Error:\nCould not load thumbnail.")
-            print(f"Error loading thumbnail for {filepath}: {e}")
-
-        # --- Info Labels ---
-        score_text = f"Similarity: {self.score:.4f}"
-        self.score_label = QLabel(score_text)
-        self.score_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-
-        self.filepath_label = QLabel(self.filepath)
-        self.filepath_label.setWordWrap(True)
-        self.filepath_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-
-        layout.addWidget(self.thumbnail_label)
-        layout.addWidget(self.score_label)
-        layout.addWidget(self.filepath_label)
+        item_rect = option.rect 
         
-        frame = QFrame()
-        frame.setLayout(layout)
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
+        # --- Draw Background and Selection (CORRECTED) ---
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(item_rect, option.palette.highlight())
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            # --- CORRECTED LOGIC FOR HOVER ---
+            # Get the highlight color from the palette
+            highlight_color = option.palette.highlight().color()
+            # Set its alpha to make it semi-transparent for the hover effect
+            highlight_color.setAlpha(60) 
+            painter.fillRect(item_rect, highlight_color)
+            # --- End of Correction ---
         
-        main_layout = QVBoxLayout(self)
-        main_layout.addWidget(frame)
+        # --- Draw Icon (Thumbnail) ---
+        icon_rect = QRect(item_rect.x(), item_rect.y(), ITEM_WIDTH, THUMBNAIL_SIZE)
+        pixmap = icon.pixmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+        centered_icon_rect = QRect(
+            int(icon_rect.x() + (icon_rect.width() - pixmap.width()) / 2),
+            int(icon_rect.y() + (icon_rect.height() - pixmap.height()) / 2),
+            pixmap.width(),
+            pixmap.height()
+        )
+        painter.drawPixmap(centered_icon_rect, pixmap)
 
-    def contextMenuEvent(self, event):
-        """This event handler is called when the widget is right-clicked."""
-        context_menu = QMenu(self)
+        # --- Draw Score Text ---
+        score_font = QFont()
+        score_font.setBold(True)
+        painter.setFont(score_font)
+        painter.setPen(QColor("#55aaff"))
         
-        # --- Search Action ---
-        find_similar_action = QAction("Find Similar", self)
-        find_similar_action.triggered.connect(self.emit_find_similar_signal)
-        context_menu.addAction(find_similar_action)
+        score_text = f"{score:.4f}"
+        score_rect = QRect(
+            item_rect.x() + 5, 
+            item_rect.y() + THUMBNAIL_SIZE + 5, 
+            item_rect.width() - 10, 
+            20
+        )
+        painter.drawText(score_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, score_text)
+
+        # --- Draw Filename Text (with eliding) ---
+        filename_font = QFont()
+        painter.setFont(filename_font)
+        painter.setPen(option.palette.text().color())
         
-        # Add a separator for visual grouping
-        context_menu.addSeparator()
+        filename_text = Path(filepath).name
+        filename_rect = QRect(
+            item_rect.x() + 5, 
+            item_rect.y() + THUMBNAIL_SIZE + 25, 
+            item_rect.width() - 10, 
+            20
+        )
 
-        # --- NEW: Clipboard Actions ---
-        copy_filename_action = QAction("Copy Filename", self)
-        copy_filename_action.triggered.connect(self.copy_filename_to_clipboard)
-        context_menu.addAction(copy_filename_action)
+        font_metrics = painter.fontMetrics()
+        elided_text = font_metrics.elidedText(
+            filename_text, 
+            Qt.TextElideMode.ElideRight, 
+            filename_rect.width()
+        )
+        painter.drawText(filename_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided_text)
 
-        copy_image_action = QAction("Copy Image", self)
-        copy_image_action.triggered.connect(self.copy_image_to_clipboard)
-        context_menu.addAction(copy_image_action)
-        
-        # Show the menu at the cursor's position
-        context_menu.exec(event.globalPos())
-
-    def emit_find_similar_signal(self):
-        """Emits the signal with this widget's specific filepath."""
-        self.find_similar_requested.emit(self.filepath)
-
-    def copy_filename_to_clipboard(self):
-        """Copies just the filename part of the path to the system clipboard."""
-        clipboard = QApplication.clipboard()
-        filename = Path(self.filepath).name
-        clipboard.setText(filename)
-        print(f"Copied filename to clipboard: {filename}")
-
-    def copy_image_to_clipboard(self):
-        """Copies the full-resolution image to the system clipboard."""
-        try:
-            clipboard = QApplication.clipboard()
-            # Load the full image, not the thumbnail, into a QPixmap
-            pixmap = QPixmap(self.filepath)
-            if pixmap.isNull():
-                print(f"Error: Could not load image for clipboard: {self.filepath}")
-                return
-            clipboard.setPixmap(pixmap)
-            print(f"Copied image to clipboard: {self.filepath}")
-        except Exception as e:
-            print(f"An error occurred while copying image to clipboard: {e}")
+        painter.restore()
