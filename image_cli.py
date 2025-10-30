@@ -8,7 +8,6 @@ import yaml
 # Updated local imports
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
-from visualizer import start_visualization_server
 
 # Setup basic logging for the CLI
 logging.basicConfig(format='%(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -54,13 +53,7 @@ def main():
     search_text_parser.add_argument("query", type=str, help="The text description to search for.")
     search_text_parser.add_argument("--top-k", type=int, default=5, help="Number of matching images to find.")
 
-    # --- Visualize command ---
-    visualize_parser = subparsers.add_parser("visualize", help="Generate and serve an interactive 2D visualization.")
-    visualize_parser.add_argument(
-        "--output-html", type=str, default="image_visualization.html", help="Path for the output HTML file."
-    )
-    visualize_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host for the local web server.")
-    visualize_parser.add_argument("--port", type=int, default=8000, help="Port to run the local web server on.")
+    # --- REMOVED: Visualize command ---
 
     args = parser.parse_args()
     
@@ -91,12 +84,7 @@ def main():
             print(f"\n--- Top {len(results)} images matching '{args.query}' ---")
             for score, path in results:
                 print(f"Relevance: {score:.4f}\tPath: {path}")
-
-        elif args.command == "visualize":
-            embedding_data = db.get_all_embeddings_with_filepaths()
-            start_visualization_server(
-                embedding_data=embedding_data, output_html=args.output_html, host=args.host, port=args.port
-            )
+        
 
     finally:
         print("\nClosing database connection.")

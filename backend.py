@@ -5,6 +5,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+import numpy as np
+# --- CORRECT CANONICAL IMPORTS for a clean environment ---
+from umap import UMAP 
+import hdbscan 
+
 # Updated local imports
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
@@ -25,6 +30,10 @@ class BackendWorker(QObject):
     initialized = Signal()
     results_ready = Signal(list)
     status_update = Signal(str)
+    
+    # --- MODIFIED SIGNAL: Emits processed data for the native visualization ---
+    # The list contains: [(x_coord, y_coord, cluster_id, filepath), ...]
+    visualization_data_ready = Signal(list) 
 
     def __init__(self):
         super().__init__()
@@ -73,6 +82,59 @@ class BackendWorker(QObject):
         results = self.db.search_similar_images(image_path=image_path, top_k=top_k)
 
         self.results_ready.emit(results)
+    
+    # --- ADDED SLOT: Performs UMAP/HDBSCAN in the worker thread ---
+    @Slot()
+    def request_visualization_data(self):
+        if not self.db: 
+            self.error.emit("Database not initialized for visualization request.")
+            return
+
+        self.status_update.emit("Preparing 2D visualization data (UMAP/HDBSCAN)...")
+        
+        try:
+            # 1. Fetch data
+            embedding_dicts = self.db.get_all_embeddings_with_filepaths()
+            if not embedding_dicts:
+                self.status_update.emit("Visualization failed: No images found in database.")
+                return
+
+            all_embeddings = np.array([item["embedding"] for item in embedding_dicts])
+            filepaths = [item["filepath"] for item in embedding_dicts]
+            
+            # 2. UMAP (Dimensionality Reduction)
+            logger.info("Performing UMAP...")
+            reducer = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42) 
+            coords_2d = reducer.fit_transform(all_embeddings)
+            
+            # 3. HDBSCAN (Clustering)
+            logger.info("Clustering with HDBSCAN...")
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=None)
+            cluster_labels = clusterer.fit_predict(coords_2d)
+
+            # 4. Prepare the final list for the UI thread
+            plot_data = []
+            for i, fp in enumerate(filepaths):
+                # Data format: (x, y, cluster, filepath)
+                plot_data.append((float(coords_2d[i, 0]), float(coords_2d[i, 1]), int(cluster_labels[i]), fp))
+            
+            self.status_update.emit(f"Visualization data ready for {len(plot_data)} images.")
+            self.visualization_data_ready.emit(plot_data)
+            
+        except (ImportError, AttributeError) as e:
+            # Catch both import errors and attribute errors for robustness
+            msg = (
+                f"Visualization failed due to missing or incorrectly installed package: {type(e).__name__}.\n"
+                "Please ensure all visualization packages are installed:\n"
+                "pip install umap-learn hdbscan pyqtgraph"
+            )
+            logger.error(msg)
+            logger.error(traceback.format_exc())
+            self.error.emit(msg)
+        except Exception as e:
+            logger.error("--- ERROR IN VISUALIZATION DATA PREPARATION ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
     
     @Slot()
     def shutdown(self):

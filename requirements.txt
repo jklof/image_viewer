@@ -1,0 +1,22 @@
+# --- Core Application Dependencies ---
+PySide6
+# Optional: for the dark theme in main.py
+pyqtdarktheme
+
+# --- ML/Embeddings Core Dependencies ---
+# Transformers and PyTorch are the heaviest dependencies
+torch
+transformers
+numpy
+Pillow  # PIL is imported as PIL.Image
+
+# --- Database/IO Dependencies ---
+pyyaml  # For image_cli.py config loading
+tqdm    # For image_db.py progress bars
+scipy   # For image_db.py distance calculation
+
+# --- High-Performance Visualization Dependencies ---
+# These are required for the UMAP/HDBSCAN native visualization
+umap-learn
+hdbscan
+pyqtgraph 
