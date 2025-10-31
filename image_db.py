@@ -30,6 +30,8 @@ class ImageDatabase:
         self.db_path = db_path
         self.embedder = embedder
 
+        # This is now SAFE because this __init__ will be called from the worker thread.
+        # No need for check_same_thread=False.
         self.conn = sqlite3.connect(self.db_path)
         self.conn.execute("PRAGMA foreign_keys = ON;")
         self._create_tables()
@@ -218,7 +220,6 @@ class ImageDatabase:
         ]
         return final_results if top_k == -1 else final_results[:top_k]
 
-    # --- MODIFIED: Default value for top_k is now -1 (all results) ---
     def search_similar_images(self, image_path: str, top_k: int = -1):
         query_path = Path(image_path)
         try:
@@ -236,7 +237,6 @@ class ImageDatabase:
         final_results = [(1.0, str(query_path))] + other_results
         return final_results[:top_k]
 
-    # --- MODIFIED: Default value for top_k is now -1 (all results) ---
     def search_by_text(self, text_query: str, top_k: int = -1):
         query_embedding = self.embedder.embed_text(text_query)
         return self._perform_search(query_embedding, top_k)
