@@ -1,5 +1,3 @@
-# image_cli.py
-
 import argparse
 import logging
 from pathlib import Path
@@ -10,8 +8,9 @@ from image_db import ImageDatabase
 from ml_core import ImageEmbedder
 
 # Setup basic logging for the CLI
-logging.basicConfig(format='%(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format="%(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def load_config(config_path="config.yml"):
     """Loads the directories to scan from the YAML configuration file."""
@@ -32,11 +31,22 @@ def load_config(config_path="config.yml"):
 def main():
     """Main function to handle command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="An AI-powered command-line image management tool.", formatter_class=argparse.RawTextHelpFormatter
+        description="An AI-powered command-line image management tool.",
+        formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--db-path", type=str, default="images.db", help="Path to the SQLite database file.")
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default="images.db",
+        help="Path to the SQLite database file.",
+    )
     parser.add_argument("--config", type=str, default="config.yml", help="Path to the config.yml file.")
-    parser.add_argument("--model-id", type=str, default="openai/clip-vit-base-patch32", help="The CLIP model to use.")
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="openai/clip-vit-base-patch32",
+        help="The CLIP model to use.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
 
@@ -56,12 +66,12 @@ def main():
     # --- REMOVED: Visualize command ---
 
     args = parser.parse_args()
-    
+
     # Lazily instantiate the embedder only for commands that need it.
     embedder = None
     if args.command in ["sync", "search-image", "search-text"]:
         embedder = ImageEmbedder()
-        
+
     db = ImageDatabase(db_path=args.db_path, embedder=embedder)
 
     try:
@@ -84,7 +94,6 @@ def main():
             print(f"\n--- Top {len(results)} images matching '{args.query}' ---")
             for score, path in results:
                 print(f"Relevance: {score:.4f}\tPath: {path}")
-        
 
     finally:
         print("\nClosing database connection.")

@@ -1,5 +1,3 @@
-# ml_core.py
-
 import logging
 from typing import List
 
