@@ -60,45 +60,27 @@ class BackendWorker(QObject):
 
     @Slot()
     def request_visualization_data(self):
+        """
+        --- MODIFIED: This method now directly queries the pre-calculated data ---
+        """
         if not self.db:
             self.error.emit("Database not initialized for visualization request.")
             return
-        self.status_update.emit("Preparing 2D visualization data (UMAP/HDBSCAN)...")
+        self.status_update.emit("Loading pre-calculated visualization data...")
         try:
-            embedding_dicts = self.db.get_all_embeddings_with_filepaths()
-            if not embedding_dicts:
-                self.status_update.emit("Visualization failed: No images found in database.")
+            # Directly query the pre-calculated data from the database
+            plot_data = self.db.get_visualization_data()
+
+            if not plot_data:
+                # This can happen if sync hasn't run or there are no images.
+                self.status_update.emit("Visualization failed: No data found. Please run a sync from the command line.")
+                self.visualization_data_ready.emit([])  # Emit empty list to clear the view
                 return
-            all_embeddings = np.array([item["embedding"] for item in embedding_dicts])
-            filepaths = [item["filepath"] for item in embedding_dicts]
-            logger.info("Performing UMAP...")
-            reducer = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-            coords_2d = reducer.fit_transform(all_embeddings)
-            logger.info("Clustering with HDBSCAN...")
-            clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=None)
-            cluster_labels = clusterer.fit_predict(coords_2d)
-            plot_data = []
-            for i, fp in enumerate(filepaths):
-                plot_data.append(
-                    (
-                        float(coords_2d[i, 0]),
-                        float(coords_2d[i, 1]),
-                        int(cluster_labels[i]),
-                        fp,
-                    )
-                )
+
             self.status_update.emit(f"Visualization data ready for {len(plot_data)} images.")
             self.visualization_data_ready.emit(plot_data)
-        except (ImportError, AttributeError) as e:
-            msg = (
-                f"Visualization failed: {type(e).__name__}.\n"
-                "Please install all visualization packages:\n"
-                "pip install umap-learn hdbscan pyqtgraph"
-            )
-            logger.error(msg, exc_info=True)
-            self.error.emit(msg)
         except Exception as e:
-            logger.error("Error in visualization data preparation", exc_info=True)
+            logger.error("Error loading visualization data from database", exc_info=True)
             self.error.emit(traceback.format_exc())
 
     @Slot()

@@ -20,7 +20,7 @@ class AppController(QObject):
     changes between the view (MainWindow) and the backend.
     """
 
-    # --- NEW SIGNALS to communicate with the worker thread ---
+    # --- Signals to communicate with the worker thread ---
     request_text_search = Signal(str)
     request_image_search = Signal(str)
     request_visualization = Signal()
@@ -54,7 +54,7 @@ class AppController(QObject):
         self.window.visualization_triggered.connect(self.on_visualization_requested)
         self.window.closing.connect(self.on_main_window_closing)
 
-        # --- Controller to Backend (CORRECTED) ---
+        # --- Controller to Backend ---
         # Connect the new signals to the worker's slots. This ensures the calls
         # are queued and executed in the worker thread.
         self.worker_thread.started.connect(self.backend_worker.initialize)
@@ -93,7 +93,6 @@ class AppController(QObject):
         self.window.clear_results()
         self.window.show_loading_state("Ordering all images, please wait...")
         self.window.set_controls_enabled(False)
-        # --- CORRECTED: Emit a signal instead of a direct call ---
         self.request_text_search.emit(query)
 
     @Slot(str)
@@ -102,15 +101,13 @@ class AppController(QObject):
         self.window.clear_results()
         self.window.show_loading_state("Ordering all images, please wait...")
         self.window.set_controls_enabled(False)
-        # --- CORRECTED: Emit a signal instead of a direct call ---
         self.request_image_search.emit(image_path)
 
     @Slot()
     def on_visualization_requested(self):
         self.window.clear_results()
-        self.window.show_loading_state("Calculating UMAP coordinates and clusters...")
+        self.window.show_loading_state("Loading visualization data...")
         self.window.set_controls_enabled(False)
-        # --- CORRECTED: Emit a signal instead of a direct call ---
         self.request_visualization.emit()
 
     @Slot(list)
@@ -139,7 +136,6 @@ class AppController(QObject):
     def on_main_window_closing(self):
         """Cleanly shuts down the backend thread."""
         logger.info("Controller received close signal. Shutting down backend worker.")
-        # --- CORRECTED: Emit a signal to shut down safely ---
         self.request_shutdown.emit()
         self.worker_thread.quit()
         if not self.worker_thread.wait(5000):

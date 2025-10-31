@@ -67,8 +67,8 @@ class QtVisualizer(QWidget):
     """
 
     data_loaded = Signal(int)
-    # --- MODIFIED: Added a signal to communicate status messages ---
     status_update = Signal(str)
+    image_search_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,7 +76,7 @@ class QtVisualizer(QWidget):
         self.plot_item = self.plot_widget.plotItem
 
         # Set up plot defaults
-        self.plot_item.setTitle("UMAP 2D Image Embeddings (Drag to Pan, Scroll to Zoom)")
+        self.plot_item.setTitle("UMAP 2D Image Embeddings (Double-click a point to search by similarity)")
         self.plot_item.setLabel("bottom", "UMAP Dimension 1")
         self.plot_item.setLabel("left", "UMAP Dimension 2")
         self.plot_item.showGrid(x=True, y=True, alpha=0.5)
@@ -84,55 +84,78 @@ class QtVisualizer(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.plot_widget)
 
-        # pyqtgraph setup for fast scatter plotting
         self.scatter_plot = pg.ScatterPlotItem(
             size=7,
-            pen=pg.mkPen(None),  # No outline
-            brush=pg.mkBrush(255, 255, 255, 150),  # Default brush
+            pen=pg.mkPen(None),
+            brush=pg.mkBrush(255, 255, 255, 150),
             hoverable=True,
-            tip=None,  # Custom tooltip is handled manually
+            tip=None,
         )
         self.plot_widget.addItem(self.scatter_plot)
 
-        # Use sigHovered, which handles both point-on and point-off events
         self.scatter_plot.sigHovered.connect(self._on_point_hovered_or_unhovered)
+        self.plot_item.scene().sigMouseClicked.connect(self._on_plot_clicked)
 
-        # Data storage: [(x, y, cluster, filepath), ...]
         self.all_data: list = []
-        self.tooltip = QtImageTooltip()
+        # Passing 'self' as parent helps with automatic cleanup,
+        # though we still need manual visibility management due to ToolTip flag.
+        self.tooltip = QtImageTooltip(self)
+
+        # Guard flag to prevent race conditions with hover events during view transitions
+        self._is_active = False
+
+    def showEvent(self, event):
+        """Called when the widget is being shown."""
+        super().showEvent(event)
+        self._is_active = True
+
+    def hideEvent(self, event):
+        """Called when the widget is being hidden."""
+        super().hideEvent(event)
+        self._is_active = False
+        self.tooltip.hide_tooltip()
 
     @Slot(object, object)
     def _on_point_hovered_or_unhovered(self, plot_item, points):
-        """
-        Handles the sigHovered signal.
-        - If points is not empty, it's a hover on a point.
-        - If points is empty, it's a hover off a point (unhover).
-        """
+        # Immediately return if we are not the active view
+        if not self._is_active:
+            return
+
         if len(points) == 0:
-            # Unhover event
             self.tooltip.hide_tooltip()
             self.status_update.emit("Backend ready. You can now search.")
             return
 
-        # Hover event
         point = points[0]
-        data_index = int(point.data())  # Gets the stored index
-
-        # Look up the data from our storage
-        x, y, cluster, filepath = self.all_data[data_index]
-
+        data_index = int(point.data())
+        _, _, cluster, filepath = self.all_data[data_index]
         global_mouse_pos = QCursor.pos()
-
-        # Display the image tooltip
         self.tooltip.show_image(filepath, global_mouse_pos)
-
         self.status_update.emit(f"Hover: Cluster={cluster} | File: {Path(filepath).name}")
+
+    @Slot(object)
+    def _on_plot_clicked(self, event):
+        if not event.double():
+            return
+
+        points = self.scatter_plot.pointsAt(event.pos())
+        if points.size == 0:
+            return
+
+        point = points[0]
+        data_index = int(point.data())
+
+        if 0 <= data_index < len(self.all_data):
+            _, _, _, filepath = self.all_data[data_index]
+
+            # --- CRITICAL: Immediately disable further hover events ---
+            self._is_active = False
+            self.tooltip.hide_tooltip()
+
+            self.image_search_requested.emit(filepath)
 
     @Slot(list)
     def load_plot_data(self, plot_data: list):
-        """
-        Loads the data, generates the colors, and updates the plot.
-        """
         self.tooltip.hide_tooltip()
         self.all_data = plot_data
 
@@ -141,12 +164,9 @@ class QtVisualizer(QWidget):
             self.data_loaded.emit(0)
             return
 
-        # Separate the columns
         x = np.array([d[0] for d in plot_data])
         y = np.array([d[1] for d in plot_data])
         clusters = np.array([d[2] for d in plot_data])
-
-        # Generate colors based on clusters
         max_cluster = max(clusters)
 
         if max_cluster >= 0:
@@ -167,8 +187,6 @@ class QtVisualizer(QWidget):
                 normalized_clusters = (cluster_indices % len(colors_list)) / len(colors_list)
                 mapped_colors = cmap.map(normalized_clusters, "byte")
                 all_colors[non_noise_indices] = mapped_colors
-            else:
-                pass
         else:
             all_colors = np.array([pg.mkColor("w")] * len(clusters))
 

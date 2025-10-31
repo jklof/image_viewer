@@ -48,15 +48,15 @@ class SingleImageViewer(QWidget):
         self.back_button = QPushButton("← Back to Grid View (Esc)")
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
         layout.addWidget(self.back_button)
         layout.addWidget(self.image_label, 1)
 
         self.back_button.clicked.connect(self.closed.emit)
-    
+
     def setPixmap(self, pixmap: QPixmap):
         self.image_label.setPixmap(pixmap)
-        
+
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         if key == Qt.Key.Key_Left:
@@ -67,7 +67,7 @@ class SingleImageViewer(QWidget):
             self.closed.emit()
         else:
             super().keyPressEvent(event)
-            
+
     def wheelEvent(self, event: QWheelEvent):
         if event.angleDelta().y() > 0:
             self.prev_requested.emit()
@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
     """
     The main window (View) for the application.
     """
+
     # --- Signals to Controller ---
     text_search_triggered = Signal(str)
     image_search_triggered = Signal(str)
@@ -140,7 +141,7 @@ class MainWindow(QMainWindow):
         self.results_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.visualizer_widget = QtVisualizer()
-        
+
         self.single_image_view_widget = SingleImageViewer()
         self.single_image_view_widget.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
@@ -152,7 +153,7 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.loading_label)
         self.content_stack.addWidget(self.visualizer_widget)
         self.content_stack.addWidget(self.single_image_view_widget)
-        
+
         main_layout.addWidget(self.content_stack)
 
         self.setStatusBar(QStatusBar(self))
@@ -165,13 +166,16 @@ class MainWindow(QMainWindow):
         self.image_search_btn.clicked.connect(self._on_select_image_for_search)
         self.visualize_btn.clicked.connect(self.visualization_triggered.emit)
         self.results_view.customContextMenuRequested.connect(self.on_results_context_menu)
-        
+
         self.results_view.doubleClicked.connect(self._on_image_double_clicked)
-        
+
         self.single_image_view_widget.image_label.customContextMenuRequested.connect(self.on_single_view_context_menu)
         self.single_image_view_widget.closed.connect(self._return_to_grid_view)
         self.single_image_view_widget.next_requested.connect(self._navigate_next)
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
+
+        # --- Link visualizer double-click to the main image search trigger ---
+        self.visualizer_widget.image_search_requested.connect(self.image_search_triggered)
 
     def set_controls_enabled(self, enabled: bool):
         self.search_bar.setEnabled(enabled)
@@ -196,11 +200,8 @@ class MainWindow(QMainWindow):
         self.init_label.setText("Initialization Failed. Please restart.")
         self.content_stack.setCurrentWidget(self.init_label)
 
-    # --- MODIFIED: Added logic to reset scroll position ---
     def set_results_data(self, results: list):
         self.results_model.set_results(results)
-        # BUG FIX: After a new search, always scroll the view back to the top
-        # to show the most relevant result.
         if results:
             self.results_view.scrollToTop()
 
@@ -225,7 +226,7 @@ class MainWindow(QMainWindow):
         )
         if filepath:
             self.image_search_triggered.emit(filepath)
-    
+
     def _create_context_menu(self, filepath: str) -> QMenu:
         context_menu = QMenu(self)
         reorder_action = QAction("Order by Similarity to This", self)
@@ -275,10 +276,10 @@ class MainWindow(QMainWindow):
         scaled_pixmap = pixmap.scaled(
             self.single_image_view_widget.image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            Qt.TransformationMode.SmoothTransformation,
         )
         self.single_image_view_widget.setPixmap(scaled_pixmap)
-        
+
         status = f"Viewing image {self.current_single_view_index + 1} of {self.results_model.rowCount()} | {Path(filepath).name}"
         self.update_status_bar(status)
 
@@ -288,7 +289,7 @@ class MainWindow(QMainWindow):
         self.set_controls_enabled(True)
         self.update_status_bar("Ready")
         self.current_single_view_index = -1
-        
+
     @Slot()
     def _navigate_next(self):
         if self.current_single_view_index < self.results_model.rowCount() - 1:

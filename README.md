@@ -1,6 +1,6 @@
-# Image Search
+# AI Image Search
 
-A Qt App to search your local image files using natural language or by image similarity.
+The project is an "AI Image Explorer," a desktop application built with PySide6. Its core purpose is to use a CLIP model to generate embeddings for local images, store them in an SQLite database, and allow a user to perform similarity searches via text or a query image, and visualize the results.
 
 ### Core Features
 *   **Text & Image Search:** Find images using text descriptions or by providing an example image.

@@ -14,6 +14,7 @@ logging.basicConfig(format="%(name)s - %(levelname)s - %(message)s", level=loggi
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
 def load_config(config_path="config.yml") -> list[str] | None:
     """Loads the list of directories to scan from the YAML configuration file."""
     try:
@@ -32,6 +33,7 @@ def load_config(config_path="config.yml") -> list[str] | None:
         logger.error(f"Error parsing YAML file '{config_path}': {e}")
         return None
 
+
 def handle_sync(db: ImageDatabase, args: argparse.Namespace):
     """Handles the database synchronization command."""
     logger.info(f"Loading directories to scan from '{args.config}'...")
@@ -42,6 +44,7 @@ def handle_sync(db: ImageDatabase, args: argparse.Namespace):
         logger.info("Synchronization complete.")
     else:
         logger.warning("No directories were loaded from the config. Nothing to do.")
+
 
 def handle_search_image(db: ImageDatabase, args: argparse.Namespace):
     """Handles the search-by-image command."""
@@ -57,6 +60,7 @@ def handle_search_image(db: ImageDatabase, args: argparse.Namespace):
     for score, path in results:
         print(f"Similarity: {score:.4f}\tPath: {path}")
 
+
 def handle_search_text(db: ImageDatabase, args: argparse.Namespace):
     """Handles the search-by-text command."""
     logger.info(f"Searching for top {args.top_k} images matching query: '{args.query}'...")
@@ -65,6 +69,7 @@ def handle_search_text(db: ImageDatabase, args: argparse.Namespace):
     print(f"\n--- Top {len(results)} images matching '{args.query}' ---")
     for score, path in results:
         print(f"Relevance: {score:.4f}\tPath: {path}")
+
 
 def main():
     """Main function to set up parser and handle command dispatch."""
@@ -78,12 +83,7 @@ def main():
         default="images.db",
         help="Path to the SQLite database file.",
     )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="config.yml",
-        help="Path to the config.yml file."
-    )
+    parser.add_argument("--config", type=str, default="config.yml", help="Path to the config.yml file.")
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
 
@@ -111,7 +111,7 @@ def main():
     try:
         # Lazily instantiate the embedder only for commands that need it.
         # This avoids loading the large ML model for commands like '--help'.
-        if hasattr(args, 'func'):
+        if hasattr(args, "func"):
             logger.info("Initializing...")
             embedder = ImageEmbedder()
 
@@ -130,6 +130,7 @@ def main():
         if db:
             logger.info("Closing database connection.")
             db.close()
+
 
 if __name__ == "__main__":
     main()
