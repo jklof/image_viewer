@@ -8,17 +8,18 @@ from PySide6.QtCore import (
     Slot,
     QMutex,
     QMutexLocker,
-    QWaitCondition,
+    QSemaphore,  # NEW IMPORT
 )
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QImage
 from ui_components import THUMBNAIL_SIZE
 
 import logging
 
 logger = logging.getLogger(__name__)
 
-# --- Cache size large enough to hold many images ---
+# --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
+NUM_WORKERS = 8
 
 
 class ThumbnailCache:
@@ -27,17 +28,17 @@ class ThumbnailCache:
     def __init__(self, size):
         self.cache = collections.OrderedDict()
         self.size = size
-        self.mutex = QMutex()
+        self.lock = QMutex()
 
     def get(self, key):
-        with QMutexLocker(self.mutex):
+        with QMutexLocker(self.lock):
             if key in self.cache:
                 self.cache.move_to_end(key)
                 return self.cache[key]
         return None
 
     def put(self, key, value):
-        with QMutexLocker(self.mutex):
+        with QMutexLocker(self.lock):
             if key in self.cache:
                 self.cache.move_to_end(key)
             self.cache[key] = value
@@ -49,41 +50,46 @@ class ThumbnailCache:
 thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
 
 
-class Worker(QRunnable):
-    """A persistent worker that pulls jobs from the LoaderManager's queue."""
+class PersistentWorker(QRunnable):
+    """A persistent worker that continuously pulls jobs from the manager."""
 
     def __init__(self, manager: "LoaderManager"):
         super().__init__()
         self.manager = manager
-        self.setAutoDelete(True)
+        # This worker should not be deleted by the thread pool when it's done
+        self.setAutoDelete(False)
 
     def run(self):
-        """The main worker loop."""
-        while True:
+        # We check for the shutdown flag after a small timeout in get_next_job
+        # or when we are finally woken up during the shutdown sequence.
+        while not self.manager._is_shutting_down:
             filepath = self.manager.get_next_job()
-            if filepath is None:
-                # Sentinel value received, manager is shutting down.
-                logger.info("Worker received shutdown signal.")
-                break
+            if filepath:
+                # --- Actual Work Logic ---
+                if thumbnail_cache.get(filepath):
+                    self.manager.job_finished(filepath, None)  # Still mark as finished
+                    continue
 
-            # --- Perform the slow I/O and processing ---
-            pixmap = QPixmap(filepath)
-            if not pixmap.isNull():
-                scaled_pixmap = pixmap.scaled(
-                    THUMBNAIL_SIZE,
-                    THUMBNAIL_SIZE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self.manager.job_finished(filepath, scaled_pixmap)
-            else:
-                self.manager.job_finished(filepath, None)
+                image = QImage(filepath)
+                pixmap = None
+                if not image.isNull():
+                    scaled = image.scaled(
+                        THUMBNAIL_SIZE,
+                        THUMBNAIL_SIZE,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    pixmap = QPixmap.fromImage(scaled)
+                else:
+                    logger.warning(f"Failed to load image: {filepath}")
+
+                self.manager.job_finished(filepath, pixmap)
 
 
 class LoaderManager(QObject):
     """
-    Manages a thread pool with a single FIFO queue.
-    Requests are deduplicated - if already queued or cached, they're ignored.
+    Manages a thread pool using QSemaphore for job synchronization,
+    ensuring a simple, race-free producer/consumer pattern.
     """
 
     thumbnail_loaded = Signal(str)
@@ -91,61 +97,93 @@ class LoaderManager(QObject):
     def __init__(self):
         super().__init__()
         self.thread_pool = QThreadPool()
-        self.is_shutting_down = False
+        self.thread_pool.setMaxThreadCount(NUM_WORKERS)
+        self._is_shutting_down = False
 
-        # --- Single queue, FIFO order ---
         self.mutex = QMutex()
-        self.wait_condition = QWaitCondition()
         self.queue = collections.deque()
-        self.queued_paths = set()  # Track what's already queued to avoid duplicates
+        self.pending_jobs = set()
 
-        # I/O bound tasks work better with 4-8 threads
-        num_workers = 8  # self.thread_pool.maxThreadCount()
-        for _ in range(num_workers):
-            worker = Worker(self)
+        # NEW: A semaphore acts as a counter for available jobs (starts at 0)
+        self.semaphore = QSemaphore(0)
+
+        # Start the persistent workers
+        for _ in range(NUM_WORKERS):
+            worker = PersistentWorker(self)
             self.thread_pool.start(worker)
 
     @Slot(str)
     def request_thumbnail(self, filepath: str):
-        """Request a thumbnail. Ignores if already cached or queued."""
+        """Request a thumbnail. Fast and non-blocking."""
+        if self._is_shutting_down:
+            return
+
+        if thumbnail_cache.get(filepath):
+            return
+
+        # --- Producer Logic: Add job and release semaphore ---
         with QMutexLocker(self.mutex):
-            # Already cached? Nothing to do
-            if thumbnail_cache.get(filepath):
+            # Check again inside lock for pending status
+            if filepath in self.pending_jobs:
                 return
 
-            # Already queued? Nothing to do
-            if filepath in self.queued_paths or self.is_shutting_down:
-                return
+            self.pending_jobs.add(filepath)
+            # Add to the FRONT of the queue (LIFO priority).
+            self.queue.appendleft(filepath)
 
-            # Add to queue
-            self.queue.append(filepath)
-            self.queued_paths.add(filepath)
-            self.wait_condition.wakeOne()
+        # Signal that one more job is available. This unblocks a waiting worker.
+        self.semaphore.release(1)
 
     def get_next_job(self) -> str | None:
-        """Called by workers to get the next available job."""
-        with QMutexLocker(self.mutex):
-            while not self.queue:
-                if self.is_shutting_down:
+        """
+        Called by workers. Blocks until a job is available, or checks
+        for shutdown after a brief timeout.
+        """
+        # Consumer Logic: Block until a job is available (semaphore counter > 0)
+        # Use a timeout (50ms) to check the shutdown flag periodically
+        if not self.semaphore.tryAcquire(1, 50):
+            with QMutexLocker(self.mutex):
+                # If we timed out on acquire, check the shutdown flag and exit loop
+                if self._is_shutting_down:
                     return None
-                self.wait_condition.wait(self.mutex)
+            return None  # Timed out, worker will loop and try acquiring again
 
-            filepath = self.queue.popleft()
-            self.queued_paths.discard(filepath)
-            return filepath
+        # If acquire succeeded, a job is guaranteed to be in the queue.
+        with QMutexLocker(self.mutex):
+            # We check shutdown again, though highly unlikely after a successful acquire
+            if self._is_shutting_down:
+                # If we acquired but are shutting down, release the resource and exit
+                self.semaphore.release(1)
+                return None
+
+            # Take from the FRONT of the queue (LIFO).
+            return self.queue.popleft()
 
     def job_finished(self, filepath: str, pixmap: QPixmap | None):
-        """Called by workers when a job completes."""
+        """Called by a worker when it completes a job."""
+        if self._is_shutting_down:
+            return
+
         if pixmap:
             thumbnail_cache.put(filepath, pixmap)
             self.thumbnail_loaded.emit(filepath)
 
-    def shutdown(self):
-        """Signals workers to terminate gracefully."""
         with QMutexLocker(self.mutex):
-            self.is_shutting_down = True
-            self.wait_condition.wakeAll()
-        self.thread_pool.waitForDone()
+            self.pending_jobs.discard(filepath)
+            # NO NEED FOR WAKE SIGNAL: The worker loops back immediately,
+            # and if another job is available, it will acquire the semaphore.
+
+    def shutdown(self):
+        """Gracefully shuts down the loader."""
+        logger.info("LoaderManager shutting down...")
+        with QMutexLocker(self.mutex):
+            self._is_shutting_down = True
+            self.queue.clear()
+            # Release the semaphore multiple times to ensure all NUM_WORKERS
+            # threads (and any blocked on acquiring) wake up and see the flag.
+            self.semaphore.release(NUM_WORKERS)
+        self.thread_pool.waitForDone(5000)
+        logger.info("LoaderManager shut down complete.")
 
 
 # A single global instance of the loader manager

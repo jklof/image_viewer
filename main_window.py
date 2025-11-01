@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
     QListView,
     QMenu,
     QStackedWidget,
+    QAbstractItemView,
 )
-
 from PySide6.QtGui import QAction, QPixmap, QKeyEvent, QResizeEvent, QWheelEvent, QColor
 from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex
 
@@ -144,6 +144,13 @@ class MainWindow(QMainWindow):
         self.results_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.results_view.setMovement(QListView.Movement.Static)
         self.results_view.setSpacing(10)
+
+        # --- Key performance optimizations for QListView ---
+        self.results_view.setUniformItemSizes(True)
+        self.results_view.setBatchSize(20)
+
+        self.results_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
         self.results_model = ImageResultModel(self)
         self.results_view.setModel(self.results_model)
         self.results_view.setItemDelegate(SearchResultDelegate(self))
@@ -183,7 +190,6 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget.next_requested.connect(self._navigate_next)
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
 
-        # --- Link visualizer double-click to the main image search trigger ---
         self.visualizer_widget.image_search_requested.connect(self.image_search_triggered)
 
     def set_controls_enabled(self, enabled: bool):
@@ -198,7 +204,6 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def show_loading_state(self, message: str):
         self.loading_message_label.setText(message)
-        # --- Start with the default blue color for normal loading ---
         self.loading_spinner.start_animation(QColor(85, 170, 255))
         self.content_stack.setCurrentWidget(self.loading_overlay_widget)
 
@@ -211,9 +216,9 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentWidget(self.visualizer_widget)
 
     def show_critical_error_state(self):
-        # --- Instead of stopping, start the animation with a red color ---
+        """Displays a persistent critical error state with a red spinner."""
         self.loading_message_label.setText("A critical error occurred.")
-        self.loading_spinner.start_animation(QColor(220, 50, 50))  # A nice, strong red
+        self.loading_spinner.start_animation(QColor(220, 50, 50))
         self.content_stack.setCurrentWidget(self.loading_overlay_widget)
 
     def set_results_data(self, results: list):
@@ -228,7 +233,6 @@ class MainWindow(QMainWindow):
         self.selected_image_label.setText(f"Selected: ...{Path(filepath).name}")
 
     def show_critical_error(self, title: str, message: str):
-        logger.error(f"Critical error: {title} - {message}")
         QMessageBox.critical(self, title, message)
 
     @Slot()
