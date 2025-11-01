@@ -385,7 +385,7 @@ class ImageDatabase:
         all_shas = [item["sha256"] for item in embedding_data]
 
         logger.info("Performing UMAP reduction...")
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42, verbose=True, n_jobs=-1)
+        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, verbose=True, n_jobs=-1)
         coords_2d = reducer.fit_transform(all_embeddings)
 
         logger.info("Clustering with HDBSCAN...")

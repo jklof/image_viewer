@@ -19,12 +19,15 @@ from PySide6.QtWidgets import (
     QMenu,
     QStackedWidget,
 )
-from PySide6.QtGui import QAction, QPixmap, QKeyEvent, QResizeEvent, QWheelEvent
+
+from PySide6.QtGui import QAction, QPixmap, QKeyEvent, QResizeEvent, QWheelEvent, QColor
 from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex
 
 from ui_components import SearchResultDelegate, FILEPATH_ROLE
 from qt_visualizer import QtVisualizer
 from virtual_model import ImageResultModel
+from loading_spinner import PulsingSpinner
+
 
 # Forward-declaring the controller type for type hinting to avoid circular imports
 if typing.TYPE_CHECKING:
@@ -125,10 +128,16 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(controls_layout)
 
         self.content_stack = QStackedWidget()
-        self.init_label = QLabel("Initializing, please wait...")
-        self.init_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.loading_label = QLabel()
-        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.loading_overlay_widget = QWidget()
+        loading_layout = QVBoxLayout(self.loading_overlay_widget)
+        loading_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading_spinner = PulsingSpinner(self.loading_overlay_widget)
+        self.loading_message_label = QLabel()
+        self.loading_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading_message_label.setStyleSheet("font-size: 16px; color: #aaa;")
+        loading_layout.addWidget(self.loading_spinner)
+        loading_layout.addWidget(self.loading_message_label)
 
         self.results_view = QListView()
         self.results_view.setViewMode(QListView.ViewMode.IconMode)
@@ -145,19 +154,18 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget = SingleImageViewer()
         self.single_image_view_widget.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
-        for label in [self.init_label, self.loading_label]:
-            label.setStyleSheet("font-size: 16px; color: #aaa;")
-
-        self.content_stack.addWidget(self.init_label)
+        self.content_stack.addWidget(self.loading_overlay_widget)
         self.content_stack.addWidget(self.results_view)
-        self.content_stack.addWidget(self.loading_label)
         self.content_stack.addWidget(self.visualizer_widget)
         self.content_stack.addWidget(self.single_image_view_widget)
 
         main_layout.addWidget(self.content_stack)
 
         self.setStatusBar(QStatusBar(self))
-        self.content_stack.setCurrentWidget(self.init_label)
+
+        self.content_stack.setCurrentWidget(self.loading_overlay_widget)
+        self.loading_message_label.setText("Initializing, please wait...")
+        self.loading_spinner.start_animation(QColor(85, 170, 255))
         self.set_controls_enabled(False)
 
     def _connect_ui_signals(self):
@@ -169,6 +177,7 @@ class MainWindow(QMainWindow):
 
         self.results_view.doubleClicked.connect(self._on_image_double_clicked)
 
+        self.single_image_view_widget.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.single_image_view_widget.image_label.customContextMenuRequested.connect(self.on_single_view_context_menu)
         self.single_image_view_widget.closed.connect(self._return_to_grid_view)
         self.single_image_view_widget.next_requested.connect(self._navigate_next)
@@ -186,19 +195,26 @@ class MainWindow(QMainWindow):
     def update_status_bar(self, message: str):
         self.statusBar().showMessage(message)
 
+    @Slot(str)
     def show_loading_state(self, message: str):
-        self.loading_label.setText(message)
-        self.content_stack.setCurrentWidget(self.loading_label)
+        self.loading_message_label.setText(message)
+        # --- Start with the default blue color for normal loading ---
+        self.loading_spinner.start_animation(QColor(85, 170, 255))
+        self.content_stack.setCurrentWidget(self.loading_overlay_widget)
 
     def show_results_view(self):
+        self.loading_spinner.stop_animation()
         self.content_stack.setCurrentWidget(self.results_view)
 
     def show_visualizer_view(self):
+        self.loading_spinner.stop_animation()
         self.content_stack.setCurrentWidget(self.visualizer_widget)
 
-    def show_initialization_failed_state(self):
-        self.init_label.setText("Initialization Failed. Please restart.")
-        self.content_stack.setCurrentWidget(self.init_label)
+    def show_critical_error_state(self):
+        # --- Instead of stopping, start the animation with a red color ---
+        self.loading_message_label.setText("A critical error occurred.")
+        self.loading_spinner.start_animation(QColor(220, 50, 50))  # A nice, strong red
+        self.content_stack.setCurrentWidget(self.loading_overlay_widget)
 
     def set_results_data(self, results: list):
         self.results_model.set_results(results)
@@ -212,6 +228,7 @@ class MainWindow(QMainWindow):
         self.selected_image_label.setText(f"Selected: ...{Path(filepath).name}")
 
     def show_critical_error(self, title: str, message: str):
+        logger.error(f"Critical error: {title} - {message}")
         QMessageBox.critical(self, title, message)
 
     @Slot()
@@ -303,7 +320,9 @@ class MainWindow(QMainWindow):
             self._update_single_image_view()
 
     def resizeEvent(self, event: QResizeEvent):
-        if self.content_stack.currentWidget() is self.single_image_view_widget:
+        if self.content_stack.currentWidget() is self.loading_overlay_widget:
+            pass
+        elif self.content_stack.currentWidget() is self.single_image_view_widget:
             self._update_single_image_view()
         super().resizeEvent(event)
 

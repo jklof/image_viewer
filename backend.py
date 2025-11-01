@@ -35,46 +35,50 @@ class BackendWorker(QObject):
             self.db = ImageDatabase(db_path=DB_PATH, embedder=self.embedder)
             self.initialized.emit()
         except Exception as e:
-            logger.error("--- AN ERROR OCCURRED IN THE BACKEND THREAD ---")
+            logger.error("--- AN ERROR OCCURRED DURING INITIALIZATION ---")
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 
-    # ... rest of the file is identical ...
     @Slot(str)
     def perform_text_search(self, query: str):
         if not self.db:
             return
-        logger.info(f"Performing text search to order all images by: '{query}'")
-        self.status_update.emit(f"Ordering all images by: '{query}'...")
-        results = self.db.search_by_text(text_query=query)
-        self.results_ready.emit(results)
+        try:
+            logger.info(f"Performing text search to order all images by: '{query}'")
+            self.status_update.emit(f"Ordering all images by: '{query}'...")
+            results = self.db.search_by_text(text_query=query)
+            self.results_ready.emit(results)
+        except Exception as e:
+            logger.error("--- AN ERROR OCCURRED DURING TEXT SEARCH ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
 
     @Slot(str)
     def perform_image_search(self, image_path: str):
         if not self.db:
             return
-        logger.info(f"Performing image search to order all images by: {image_path}")
-        self.status_update.emit(f"Ordering all images by similarity to {Path(image_path).name}...")
-        results = self.db.search_similar_images(image_path=image_path)
-        self.results_ready.emit(results)
+        try:
+            logger.info(f"Performing image search to order all images by: {image_path}")
+            self.status_update.emit(f"Ordering all images by similarity to {Path(image_path).name}...")
+            results = self.db.search_similar_images(image_path=image_path)
+            self.results_ready.emit(results)
+        except Exception as e:
+            logger.error("--- AN ERROR OCCURRED DURING IMAGE SEARCH ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
 
     @Slot()
     def request_visualization_data(self):
-        """
-        --- MODIFIED: This method now directly queries the pre-calculated data ---
-        """
         if not self.db:
             self.error.emit("Database not initialized for visualization request.")
             return
         self.status_update.emit("Loading pre-calculated visualization data...")
         try:
-            # Directly query the pre-calculated data from the database
             plot_data = self.db.get_visualization_data()
 
             if not plot_data:
-                # This can happen if sync hasn't run or there are no images.
                 self.status_update.emit("Visualization failed: No data found. Please run a sync from the command line.")
-                self.visualization_data_ready.emit([])  # Emit empty list to clear the view
+                self.visualization_data_ready.emit([])
                 return
 
             self.status_update.emit(f"Visualization data ready for {len(plot_data)} images.")

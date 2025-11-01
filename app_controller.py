@@ -82,9 +82,9 @@ class AppController(QObject):
 
     @Slot(str)
     def on_backend_error(self, error_message: str):
-        self.window.show_critical_error("Backend Error", f"A critical error occurred: {error_message}")
+        self.window.show_critical_error_state()
         self.window.update_status_bar("Backend failed to initialize. Please restart.")
-        self.window.show_initialization_failed_state()
+        self.window.show_critical_error("Backend Error", f"A critical error occurred: {error_message}")
 
     @Slot(str)
     def on_text_search_requested(self, query: str):
