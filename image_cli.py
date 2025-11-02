@@ -9,10 +9,9 @@ from ml_core import ImageEmbedder
 
 # Setup basic logging for the CLI. Set to WARNING to keep the output clean,
 # but allow module-level loggers (like ml_core) to print INFO if needed.
-logging.basicConfig(format="%(name)s - %(levelname)s - %(message)s", level=logging.WARNING)
-# Specifically set the logger for this script to INFO for our status messages.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# Specifically set the logger for this script to INFO for our status messages.
 
 
 def load_config(config_path="config.yml") -> list[str] | None:

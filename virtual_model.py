@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from constants import FILEPATH_ROLE, SCORE_ROLE, PIXMAP_ROLE
+from constants import FILEPATH_ROLE, SCORE_ROLE
 
 from ui_components import create_placeholder_icon
 from loader_manager import loader_manager, thumbnail_cache

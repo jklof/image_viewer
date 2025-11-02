@@ -21,9 +21,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
 )
 from PySide6.QtGui import QAction, QPixmap, QKeyEvent, QResizeEvent, QWheelEvent, QColor
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize
 
-from ui_components import SearchResultDelegate, FILEPATH_ROLE
+from ui_components import SearchResultDelegate, FILEPATH_ROLE, create_thumbnail_label_with_border
 from qt_visualizer import QtVisualizer
 from virtual_model import ImageResultModel
 from loading_spinner import PulsingSpinner
@@ -109,26 +109,75 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        controls_layout = QHBoxLayout()
+        # --- Top Action Bar ---
+        action_bar_layout = QHBoxLayout()
+        action_bar_layout.setSpacing(5)
+
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Enter text to re-order all images by similarity...")
+        self.search_bar.setClearButtonEnabled(True)
+        self.search_bar.setMinimumHeight(35)
+        # Apply base style AND disabled style for QLineEdit
+        self.search_bar.setStyleSheet(
+            "padding-left: 10px; padding-right: 10px; border-radius: 8px;"
+            "QLineEdit:disabled { background-color: #404040; color: #808080; border: 1px solid #505050; }"
+        )
+
+        # Apply disabled style for standard QPushButton (relying on theme for enabled look)
+        disabled_button_style = (
+            "QPushButton:disabled { background-color: #404040; color: #808080; border: 1px solid #505050; }"
+        )
+
         self.text_search_btn = QPushButton("Order by Text")
+        self.text_search_btn.setMinimumHeight(35)
+        self.text_search_btn.setToolTip("Order all images by similarity to the entered text.")
+        self.text_search_btn.setStyleSheet(disabled_button_style)
+
         self.image_search_btn = QPushButton("Order by Image")
-        self.selected_image_label = QLabel("No image selected.")
-        self.selected_image_label.setWordWrap(True)
+        self.image_search_btn.setMinimumHeight(35)
+        self.image_search_btn.setToolTip("Select an image from your computer to order all images by similarity.")
+        self.image_search_btn.setStyleSheet(disabled_button_style)
+
+        # Selected Image Thumbnail area
+        self.selected_image_thumbnail_label = create_thumbnail_label_with_border(QSize(35, 35))
+        self.selected_image_thumbnail_label.setToolTip("Image currently selected for 'Order by Image' search.")
+        self.selected_image_thumbnail_label.hide()  # Initially hidden
+
         self.visualize_btn = QPushButton("Visualize Embeddings")
+        self.visualize_btn.setMinimumHeight(35)
+        self.visualize_btn.setToolTip("View a 2D visualization of all image embeddings.")
+        # Apply custom blue style for enabled state AND dark style for disabled state
+        self.visualize_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #55aaff;
+                color: white;
+                border-radius: 8px;
+            }
+            QPushButton:disabled {
+                background-color: #404040;
+                color: #808080;
+                border: 1px solid #505050;
+            }
+            """
+        )
 
-        controls_layout.addWidget(self.search_bar)
-        controls_layout.addWidget(self.text_search_btn)
-        controls_layout.addWidget(self.image_search_btn)
-        controls_layout.addWidget(self.selected_image_label)
-        controls_layout.addStretch()
-        controls_layout.addWidget(self.visualize_btn)
-        main_layout.addLayout(controls_layout)
+        action_bar_layout.addWidget(self.search_bar)
+        action_bar_layout.addWidget(self.text_search_btn)
+        action_bar_layout.addWidget(self.image_search_btn)
+        action_bar_layout.addWidget(self.selected_image_thumbnail_label)
+        action_bar_layout.addStretch()
+        action_bar_layout.addWidget(self.visualize_btn)
+        main_layout.addLayout(action_bar_layout)
 
+        # --- Content Stack ---
         self.content_stack = QStackedWidget()
+        main_layout.addWidget(self.content_stack)
 
+        # Loading Overlay
         self.loading_overlay_widget = QWidget()
         loading_layout = QVBoxLayout(self.loading_overlay_widget)
         loading_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -139,25 +188,26 @@ class MainWindow(QMainWindow):
         loading_layout.addWidget(self.loading_spinner)
         loading_layout.addWidget(self.loading_message_label)
 
+        # Results View
         self.results_view = QListView()
         self.results_view.setViewMode(QListView.ViewMode.IconMode)
         self.results_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.results_view.setMovement(QListView.Movement.Static)
-        self.results_view.setSpacing(10)
+        self.results_view.setSpacing(10)  # More spacing for cleaner grid
 
         # --- Key performance optimizations for QListView ---
         self.results_view.setUniformItemSizes(True)
         self.results_view.setBatchSize(20)
-
         self.results_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-
         self.results_model = ImageResultModel(self)
         self.results_view.setModel(self.results_model)
         self.results_view.setItemDelegate(SearchResultDelegate(self))
         self.results_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
+        # Visualizer Widget
         self.visualizer_widget = QtVisualizer()
 
+        # Single Image Viewer
         self.single_image_view_widget = SingleImageViewer()
         self.single_image_view_widget.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
@@ -166,10 +216,11 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.visualizer_widget)
         self.content_stack.addWidget(self.single_image_view_widget)
 
-        main_layout.addWidget(self.content_stack)
-
+        # Status Bar
+        self.statusBar().setStyleSheet("font-size: 14px; padding-left: 5px;")
         self.setStatusBar(QStatusBar(self))
 
+        # Initial State
         self.content_stack.setCurrentWidget(self.loading_overlay_widget)
         self.loading_message_label.setText("Initializing, please wait...")
         self.loading_spinner.start_animation(QColor(85, 170, 255))
@@ -229,8 +280,20 @@ class MainWindow(QMainWindow):
     def clear_results(self):
         self.results_model.clear()
 
+    @Slot(str)
     def update_selected_image_label(self, filepath: str):
-        self.selected_image_label.setText(f"Selected: ...{Path(filepath).name}")
+        pixmap = QPixmap(filepath)
+        if not pixmap.isNull():
+            scaled_pixmap = pixmap.scaled(
+                self.selected_image_thumbnail_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.selected_image_thumbnail_label.setPixmap(scaled_pixmap)
+            self.selected_image_thumbnail_label.setToolTip(f"Selected: {Path(filepath).name}")
+            self.selected_image_thumbnail_label.show()
+        else:
+            self.selected_image_thumbnail_label.hide()
 
     def show_critical_error(self, title: str, message: str):
         QMessageBox.critical(self, title, message)
