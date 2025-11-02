@@ -167,9 +167,19 @@ class QtVisualizer(QWidget):
         x = np.array([d[0] for d in plot_data])
         y = np.array([d[1] for d in plot_data])
         clusters = np.array([d[2] for d in plot_data])
-        max_cluster = max(clusters)
 
-        if max_cluster >= 0:
+        # 1. Define the default color for noise points.
+        gray_color = np.array([100, 100, 100, 150], dtype=np.uint8)
+
+        # 2. Initialize the color array for all points, defaulting them to the noise color.
+        # np.tile efficiently creates an array by repeating the gray_color for each point.
+        all_colors = np.tile(gray_color, (len(plot_data), 1))
+
+        # 3. Identify which points are NOT noise.
+        non_noise_indices = clusters != -1
+
+        # 4. If there are any non-noise points, calculate their colors and update the array.
+        if np.any(non_noise_indices):
             colors_list = [
                 (255, 0, 0),
                 (255, 255, 0),
@@ -179,20 +189,16 @@ class QtVisualizer(QWidget):
                 (255, 0, 255),
             ]
             cmap = pg.ColorMap(pos=np.linspace(0.0, 1.0, len(colors_list)), color=colors_list)
-            all_colors = np.empty((len(plot_data), 4), dtype=np.uint8)
-            non_noise_indices = clusters != -1
+
+            # Select only the cluster IDs of the non-noise points
             cluster_indices = clusters[non_noise_indices]
 
-            if len(cluster_indices) > 0:
-                normalized_clusters = (cluster_indices % len(colors_list)) / len(colors_list)
-                mapped_colors = cmap.map(normalized_clusters, "byte")
-                all_colors[non_noise_indices] = mapped_colors
-        else:
-            all_colors = np.array([pg.mkColor("w")] * len(clusters))
+            # Normalize them and map them to colors
+            normalized_clusters = (cluster_indices % len(colors_list)) / len(colors_list)
+            mapped_colors = cmap.map(normalized_clusters, "byte")
 
-        noise_indices = clusters == -1
-        gray_color = np.array([100, 100, 100, 150], dtype=np.uint8)
-        all_colors[noise_indices] = gray_color
+            # Assign the new colors to the appropriate rows in the main color array
+            all_colors[non_noise_indices] = mapped_colors
 
         self.scatter_plot.setData(
             x=x,

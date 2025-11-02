@@ -11,7 +11,19 @@ The project is an "AI Image Explorer," a desktop application built with PySide6.
 ## Getting Started
 
 **1. Install Dependencies**
+
+pip
+
+```bash
 pip install -r requirements.txt
+```
+
+or conda
+
+```bash
+conda env create -f environment.yml
+conda activate image-viewer-dev
+```
 
 **2. Configure Image Directories**
 Create a `config.yml` file in the project root and add the paths to your image folders:
@@ -32,3 +44,4 @@ python image_cli.py sync
 ```bash
 python main.py
 ```
+
