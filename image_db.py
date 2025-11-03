@@ -251,7 +251,11 @@ class ImageDatabase:
         # --- Phase 1: Discovery (Fast, Serial) ---
         cursor = self.conn.cursor()
         cursor.execute("SELECT filepath, mtime FROM filepaths")
-        db_files = {Path(row[0]).resolve(): row[1] for row in cursor.fetchall()}
+
+        # --- MODIFICATION 1 (FIX): Avoid slow .resolve() on every DB entry. ---
+        # This is now a very fast, in-memory operation that just loads strings,
+        # avoiding hundreds of thousands of slow filesystem calls.
+        db_files = {row[0]: row[1] for row in cursor.fetchall()}
 
         logger.info("Discovering image files on disk...")
         all_image_paths = []
@@ -269,23 +273,28 @@ class ImageDatabase:
                         pbar.update(1)
 
         logger.info(f"Found {len(all_image_paths)} total image files on disk.")
-        disk_files: Dict[Path, float] = {}
+
+        # --- MODIFICATION 2: Use strings as keys to match db_files. ---
+        disk_files: Dict[str, float] = {}
         for p in tqdm(all_image_paths, desc="Checking file modification times"):
             try:
-                disk_files[p.resolve()] = p.stat().st_mtime
+                # Resolve the path and convert to a canonical string for comparison.
+                disk_files[str(p.resolve())] = p.stat().st_mtime
             except FileNotFoundError:
                 continue
 
+        # Now both sets contain canonical path strings, making the comparison very fast.
         db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
         removed_paths = db_paths - disk_paths
         added_paths = disk_paths - db_paths
         potential_modified_paths = disk_paths.intersection(db_paths)
-        modified_paths = {p for p in potential_modified_paths if disk_files[p] > db_files[p]}
 
-        paths_to_process = list(added_paths.union(modified_paths))
+        # Create a set of modified paths using string comparison first.
+        modified_string_paths = {p for p in potential_modified_paths if disk_files[p] > db_files[p]}
 
         logger.info(
-            f"Found {len(added_paths)} new, {len(removed_paths)} removed, " f"and {len(modified_paths)} modified files."
+            f"Found {len(added_paths)} new, {len(removed_paths)} removed, "
+            f"and {len(modified_string_paths)} modified files."
         )
 
         # --- Phase 2: Immediate Deletions ---
@@ -293,15 +302,20 @@ class ImageDatabase:
             logger.info(f"Removing {len(removed_paths)} missing files from database...")
             with self.conn:
                 placeholders = ", ".join("?" for _ in removed_paths)
+                # The 'removed_paths' set already contains strings, so this is correct.
                 self.conn.execute(
                     f"DELETE FROM filepaths WHERE filepath IN ({placeholders})",
-                    [str(p) for p in removed_paths],
+                    list(removed_paths),
                 )
+
+        # --- MODIFICATION 3: Convert path strings back to Path objects for processing. ---
+        # The processing pool expects Path objects, so we convert the final set of strings.
+        string_paths_to_process = list(added_paths.union(modified_string_paths))
+        paths_to_process = [Path(p) for p in string_paths_to_process]
 
         if not paths_to_process:
             logger.info("No new or modified files to process.")
             self._cleanup_orphaned_embeddings()
-            # --- MODIFIED: Call visualization update even if no files changed, to ensure consistency ---
             self._update_visualization_data()
             return
 

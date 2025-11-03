@@ -3,10 +3,11 @@ from pathlib import Path
 import random
 from PySide6.QtCore import QObject, Signal, Slot
 import numpy as np
+from PIL import Image
 from umap import UMAP
 import hdbscan
 from image_db import ImageDatabase
-from ml_core import ImageEmbedder
+from ml_core import ImageEmbedder, EMBEDDING_SHAPE
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,17 +42,51 @@ class BackendWorker(QObject):
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 
-    @Slot(str)
-    def perform_text_search(self, query: str):
-        if not self.db:
+    @Slot(list)
+    def perform_composite_search(self, query_elements: list):
+        if not self.db or not self.embedder:
             return
         try:
-            logger.info(f"Performing text search to order all images by: '{query}'")
-            self.status_update.emit(f"Ordering all images by: '{query}'...")
-            results = self.db.search_by_text(text_query=query)
+            logger.info(f"Performing composite search with {len(query_elements)} elements.")
+            self.status_update.emit(f"Building query from {len(query_elements)} elements...")
+
+            # Initialize a zero vector for the final query
+            combined_vector = np.zeros(EMBEDDING_SHAPE, dtype=np.float32)
+
+            for element in query_elements:
+                element_type = element["type"]
+                value = element["value"]
+                weight = element["weight"]
+
+                embedding = None
+                if element_type == "text":
+                    embedding = self.embedder.embed_text(value)
+                elif element_type == "image":
+                    try:
+                        image = Image.open(value).convert("RGB")
+                        embedding = self.embedder.embed_image(image)
+                    except Exception as e:
+                        logger.warning(f"Could not load image {value} for composite query. Skipping. Error: {e}")
+                        continue
+
+                if embedding is not None:
+                    combined_vector += embedding * weight
+
+            # Normalize the final combined vector
+            norm = np.linalg.norm(combined_vector)
+            if norm > 0:
+                final_query_vector = combined_vector / norm
+            else:
+                # If all weights cancel out or elements fail, we have a zero vector.
+                # In this case, we cannot perform a search. Emit empty results.
+                logger.warning("Composite query resulted in a zero vector. Cannot perform search.")
+                self.results_ready.emit([])
+                return
+
+            results = self.db._perform_search(final_query_vector, -1)
             self.results_ready.emit(results)
         except Exception as e:
-            logger.error("--- AN ERROR OCCURRED DURING TEXT SEARCH ---")
+            logger.error("--- AN ERROR OCCURRED DURING COMPOSITE SEARCH ---")
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 
@@ -62,13 +97,9 @@ class BackendWorker(QObject):
         try:
             logger.info("Performing random ordering of all images.")
             self.status_update.emit("Randomly ordering all images...")
-            # Explicitly seed the RNG. While the 'random' module auto-seeds on
-            # import, this call guarantees it is re-seeded with a new system
-            # entropy source, ensuring different results on each run.
             random.seed()
             filepaths = self.db.get_all_unique_filepaths()
             random.shuffle(filepaths)
-            # Create results with a dummy score of 0.0, as score is irrelevant
             results = [(0.0, path) for path in filepaths]
             self.results_ready.emit(results)
         except Exception as e:
@@ -76,19 +107,7 @@ class BackendWorker(QObject):
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 
-    @Slot(str)
-    def perform_image_search(self, image_path: str):
-        if not self.db:
-            return
-        try:
-            logger.info(f"Performing image search to order all images by: {image_path}")
-            self.status_update.emit(f"Ordering all images by similarity to {Path(image_path).name}...")
-            results = self.db.search_similar_images(image_path=image_path)
-            self.results_ready.emit(results)
-        except Exception as e:
-            logger.error("--- AN ERROR OCCURRED DURING IMAGE SEARCH ---")
-            logger.error(traceback.format_exc())
-            self.error.emit(traceback.format_exc())
+    # REMOVED: perform_text_search and perform_image_search
 
     @Slot()
     def request_visualization_data(self):

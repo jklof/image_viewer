@@ -35,7 +35,7 @@ class ImageEmbedder:
         # Use default precision (float32) for CPU as float16 can be slower.
         model_kwargs = {}
         if self.device == "cuda":
-            model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["dtype"] = torch.float16
 
         logger.info(f"Loading model '{MODEL_ID}'...")
         self.model = CLIPModel.from_pretrained(MODEL_ID, **model_kwargs).to(self.device)

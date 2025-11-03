@@ -1,4 +1,4 @@
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot, QMimeData, QUrl
 from PySide6.QtGui import QIcon
 
 import logging
@@ -14,7 +14,7 @@ from loader_manager import loader_manager, thumbnail_cache
 class ImageResultModel(QAbstractListModel):
     """
     A lazy-loading virtualized list model with intelligent prefetching.
-    Requests thumbnails on-demand and prefetches nearby items for smooth scrolling.
+    Supports drag-and-drop operations by providing file URLs.
     """
 
     def __init__(self, parent=None):
@@ -56,11 +56,29 @@ class ImageResultModel(QAbstractListModel):
                 return self.placeholder_icon
         return None
 
+    # --- NEW: Drag and Drop Support ---
+    def flags(self, index):
+        default_flags = super().flags(index)
+        if index.isValid():
+            return default_flags | Qt.ItemFlag.ItemIsDragEnabled
+        return default_flags
+
+    def mimeTypes(self):
+        return ["text/uri-list"]
+
+    def mimeData(self, indexes):
+        mime_data = QMimeData()
+        urls = []
+        for index in indexes:
+            if index.isValid():
+                filepath = self.data(index, FILEPATH_ROLE)
+                urls.append(QUrl.fromLocalFile(filepath))
+        mime_data.setUrls(urls)
+        return mime_data
+
+    # --- End Drag and Drop Support ---
+
     def _prefetch_nearby(self, center_row: int):
-        """
-        Intelligently prefetch thumbnails for items near the given row.
-        Only prefetches if we've moved significantly since last prefetch.
-        """
         if abs(center_row - self._last_prefetch_row) < self._prefetch_threshold:
             return
 
@@ -75,14 +93,12 @@ class ImageResultModel(QAbstractListModel):
 
     @Slot(str)
     def on_thumbnail_ready(self, filepath: str):
-        """Called when a thumbnail finishes loading."""
         row = self._filepath_to_row_map.get(filepath)
         if row is not None:
             index = self.createIndex(row, 0)
             self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
 
     def set_results(self, results: list):
-        """Load new search results and reset prefetch state."""
         self.beginResetModel()
         self.results_data = results
         self._filepath_to_row_map = {filepath: i for i, (_, filepath) in enumerate(results)}
@@ -90,7 +106,6 @@ class ImageResultModel(QAbstractListModel):
         self.endResetModel()
 
     def clear(self):
-        """Clear all results and reset state."""
         self.beginResetModel()
         self.results_data = []
         self._filepath_to_row_map = {}

@@ -84,6 +84,12 @@ def main():
     )
     parser.add_argument("--config", type=str, default="config.yml", help="Path to the config.yml file.")
 
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Force the application to use the CPU for all ML computations, ignoring the GPU.",
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
 
     # --- Sync command ---
@@ -112,7 +118,7 @@ def main():
         # This avoids loading the large ML model for commands like '--help'.
         if hasattr(args, "func"):
             logger.info("Initializing...")
-            embedder = ImageEmbedder()  # This now instantiates with default (use_cpu_only=False)
+            embedder = ImageEmbedder(use_cpu_only=args.cpu_only)
 
             logger.info(f"Opening database at '{args.db_path}'...")
             db = ImageDatabase(db_path=args.db_path, embedder=embedder)

@@ -68,7 +68,8 @@ class QtVisualizer(QWidget):
 
     data_loaded = Signal(int)
     status_update = Signal(str)
-    image_search_requested = Signal(str)
+    # --- RENAMED SIGNAL for clarity ---
+    image_selected = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,7 +77,7 @@ class QtVisualizer(QWidget):
         self.plot_item = self.plot_widget.plotItem
 
         # Set up plot defaults
-        self.plot_item.setTitle("UMAP 2D Image Embeddings (Double-click a point to search by similarity)")
+        self.plot_item.setTitle("UMAP 2D Image Embeddings (Double-click a point to add it to the query)")
         self.plot_item.setLabel("bottom", "UMAP Dimension 1")
         self.plot_item.setLabel("left", "UMAP Dimension 2")
         self.plot_item.showGrid(x=True, y=True, alpha=0.5)
@@ -97,33 +98,26 @@ class QtVisualizer(QWidget):
         self.plot_item.scene().sigMouseClicked.connect(self._on_plot_clicked)
 
         self.all_data: list = []
-        # Passing 'self' as parent helps with automatic cleanup,
-        # though we still need manual visibility management due to ToolTip flag.
         self.tooltip = QtImageTooltip(self)
-
-        # Guard flag to prevent race conditions with hover events during view transitions
         self._is_active = False
 
     def showEvent(self, event):
-        """Called when the widget is being shown."""
         super().showEvent(event)
         self._is_active = True
 
     def hideEvent(self, event):
-        """Called when the widget is being hidden."""
         super().hideEvent(event)
         self._is_active = False
         self.tooltip.hide_tooltip()
 
     @Slot(object, object)
     def _on_point_hovered_or_unhovered(self, plot_item, points):
-        # Immediately return if we are not the active view
         if not self._is_active:
             return
 
         if len(points) == 0:
             self.tooltip.hide_tooltip()
-            self.status_update.emit("Backend ready. You can now search.")
+            self.status_update.emit("Ready")
             return
 
         point = points[0]
@@ -147,12 +141,9 @@ class QtVisualizer(QWidget):
 
         if 0 <= data_index < len(self.all_data):
             _, _, _, filepath = self.all_data[data_index]
-
-            # --- CRITICAL: Immediately disable further hover events ---
-            self._is_active = False
             self.tooltip.hide_tooltip()
-
-            self.image_search_requested.emit(filepath)
+            # --- EMIT a simple signal; let the main window decide what to do ---
+            self.image_selected.emit(filepath)
 
     @Slot(list)
     def load_plot_data(self, plot_data: list):
@@ -168,17 +159,10 @@ class QtVisualizer(QWidget):
         y = np.array([d[1] for d in plot_data])
         clusters = np.array([d[2] for d in plot_data])
 
-        # 1. Define the default color for noise points.
         gray_color = np.array([100, 100, 100, 150], dtype=np.uint8)
-
-        # 2. Initialize the color array for all points, defaulting them to the noise color.
-        # np.tile efficiently creates an array by repeating the gray_color for each point.
         all_colors = np.tile(gray_color, (len(plot_data), 1))
-
-        # 3. Identify which points are NOT noise.
         non_noise_indices = clusters != -1
 
-        # 4. If there are any non-noise points, calculate their colors and update the array.
         if np.any(non_noise_indices):
             colors_list = [
                 (255, 0, 0),
@@ -189,15 +173,9 @@ class QtVisualizer(QWidget):
                 (255, 0, 255),
             ]
             cmap = pg.ColorMap(pos=np.linspace(0.0, 1.0, len(colors_list)), color=colors_list)
-
-            # Select only the cluster IDs of the non-noise points
             cluster_indices = clusters[non_noise_indices]
-
-            # Normalize them and map them to colors
             normalized_clusters = (cluster_indices % len(colors_list)) / len(colors_list)
             mapped_colors = cmap.map(normalized_clusters, "byte")
-
-            # Assign the new colors to the appropriate rows in the main color array
             all_colors[non_noise_indices] = mapped_colors
 
         self.scatter_plot.setData(
@@ -208,6 +186,5 @@ class QtVisualizer(QWidget):
             symbol="o",
             size=7,
         )
-
         self.plot_item.autoRange()
         self.data_loaded.emit(len(plot_data))

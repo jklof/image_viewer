@@ -21,8 +21,7 @@ class AppController(QObject):
     """
 
     # --- Signals to communicate with the worker thread ---
-    request_text_search = Signal(str)
-    request_image_search = Signal(str)
+    request_composite_search = Signal(list)
     request_random_search = Signal()
     request_visualization = Signal()
     request_shutdown = Signal()
@@ -50,18 +49,15 @@ class AppController(QObject):
     def _connect_signals(self):
         """Connects signals from the view and backend to the controller's slots."""
         # --- View to Controller ---
-        self.window.text_search_triggered.connect(self.on_text_search_requested)
-        self.window.image_search_triggered.connect(self.on_image_search_requested)
+        self.window.composite_search_triggered.connect(self.on_composite_search_requested)
         self.window.visualization_triggered.connect(self.on_visualization_requested)
         self.window.closing.connect(self.on_main_window_closing)
+        self.window.random_order_triggered.connect(self.on_random_order_requested)
 
         # --- Controller to Backend ---
-        # Connect the new signals to the worker's slots. This ensures the calls
-        # are queued and executed in the worker thread.
         self.worker_thread.started.connect(self.backend_worker.initialize)
-        self.request_text_search.connect(self.backend_worker.perform_text_search)
+        self.request_composite_search.connect(self.backend_worker.perform_composite_search)
         self.request_random_search.connect(self.backend_worker.perform_random_search)
-        self.request_image_search.connect(self.backend_worker.perform_image_search)
         self.request_visualization.connect(self.backend_worker.request_visualization_data)
         self.request_shutdown.connect(self.backend_worker.shutdown)
 
@@ -78,9 +74,6 @@ class AppController(QObject):
 
     @Slot()
     def on_backend_initialized(self):
-        """
-        Once the backend is ready, trigger the initial random ordering of images.
-        """
         self.window.clear_results()
         self.window.show_loading_state("Loading initial random order...")
         self.window.set_controls_enabled(False)
@@ -92,30 +85,27 @@ class AppController(QObject):
         self.window.update_status_bar("Backend failed to initialize. Please restart.")
         self.window.show_critical_error("Backend Error", f"A critical error occurred: {error_message}")
 
-    @Slot(str)
-    def on_text_search_requested(self, query: str):
-        if not query:
-            return
-        self.window.clear_results()
-        self.window.show_loading_state("Ordering all images, please wait...")
-        self.window.set_controls_enabled(False)
-
-        if query == "*":
+    @Slot(list)
+    def on_composite_search_requested(self, query_elements: list):
+        if not query_elements:
+            self.window.show_loading_state("No query elements provided, showing random order...")
             self.request_random_search.emit()
-        else:
-            self.request_text_search.emit(query)
+            return
 
-    @Slot(str)
-    def on_image_search_requested(self, image_path: str):
-        self.window.update_selected_image_label(image_path)
         self.window.clear_results()
-        self.window.show_loading_state("Ordering all images, please wait...")
+        self.window.show_loading_state("Constructing query and ordering images...")
         self.window.set_controls_enabled(False)
-        self.request_image_search.emit(image_path)
+        self.request_composite_search.emit(query_elements)
+
+    @Slot()
+    def on_random_order_requested(self):
+        self.window.clear_results()
+        self.window.show_loading_state("Randomly reordering images...")
+        self.window.set_controls_enabled(False)
+        self.request_random_search.emit()
 
     @Slot()
     def on_visualization_requested(self):
-        self.window.clear_results()
         self.window.show_loading_state("Loading visualization data...")
         self.window.set_controls_enabled(False)
         self.request_visualization.emit()
@@ -144,7 +134,6 @@ class AppController(QObject):
 
     @Slot()
     def on_main_window_closing(self):
-        """Cleanly shuts down the backend thread."""
         logger.info("Controller received close signal. Shutting down backend worker.")
         self.request_shutdown.emit()
         self.worker_thread.quit()
