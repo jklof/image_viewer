@@ -20,16 +20,25 @@ class ImageEmbedder:
     """
     An embedder that uses a single, powerful CLIP model (ViT-H-14) for
     state-of-the-art search performance with excellent efficiency.
+    Can be configured to run on CPU only.
     """
 
-    def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {self.device}")
+    def __init__(self, use_cpu_only: bool = False):
+        if use_cpu_only:
+            self.device = "cpu"
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"ImageEmbedder initializing. Using device: {self.device}")
 
-        # Eagerly load the model for best performance.
-        # Use torch_dtype=torch.float16 to ensure it loads in half-precision.
+        # Eagerly load the model.
+        # Use torch.float16 for GPU to save VRAM and improve performance.
+        # Use default precision (float32) for CPU as float16 can be slower.
+        model_kwargs = {}
+        if self.device == "cuda":
+            model_kwargs["torch_dtype"] = torch.float16
+
         logger.info(f"Loading model '{MODEL_ID}'...")
-        self.model = CLIPModel.from_pretrained(MODEL_ID, dtype=torch.float16).to(self.device)
+        self.model = CLIPModel.from_pretrained(MODEL_ID, **model_kwargs).to(self.device)
         self.processor = CLIPProcessor.from_pretrained(MODEL_ID)
         logger.info("Model loaded successfully.")
 

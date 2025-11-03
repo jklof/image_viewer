@@ -112,7 +112,7 @@ def main():
         # This avoids loading the large ML model for commands like '--help'.
         if hasattr(args, "func"):
             logger.info("Initializing...")
-            embedder = ImageEmbedder()
+            embedder = ImageEmbedder()  # This now instantiates with default (use_cpu_only=False)
 
             logger.info(f"Opening database at '{args.db_path}'...")
             db = ImageDatabase(db_path=args.db_path, embedder=embedder)

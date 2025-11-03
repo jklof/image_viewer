@@ -1,5 +1,6 @@
 import traceback
 from pathlib import Path
+import random
 from PySide6.QtCore import QObject, Signal, Slot
 import numpy as np
 from umap import UMAP
@@ -20,18 +21,19 @@ class BackendWorker(QObject):
     status_update = Signal(str)
     visualization_data_ready = Signal(list)
 
-    def __init__(self):
+    def __init__(self, use_cpu_only: bool = False):
         super().__init__()
         self.db = None
         self.embedder = None
-        logger.info("BackendWorker constructed in main thread.")
+        self.use_cpu_only = use_cpu_only
+        logger.info(f"BackendWorker constructed in main thread. CPU-only mode: {self.use_cpu_only}")
 
     @Slot()
     def initialize(self):
         try:
             logger.info("BackendWorker.initialize() starting in worker thread.")
             self.status_update.emit("Initializing backend... This may take a moment.")
-            self.embedder = ImageEmbedder()
+            self.embedder = ImageEmbedder(use_cpu_only=self.use_cpu_only)
             self.db = ImageDatabase(db_path=DB_PATH, embedder=self.embedder)
             self.initialized.emit()
         except Exception as e:
@@ -50,6 +52,27 @@ class BackendWorker(QObject):
             self.results_ready.emit(results)
         except Exception as e:
             logger.error("--- AN ERROR OCCURRED DURING TEXT SEARCH ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
+
+    @Slot()
+    def perform_random_search(self):
+        if not self.db:
+            return
+        try:
+            logger.info("Performing random ordering of all images.")
+            self.status_update.emit("Randomly ordering all images...")
+            # Explicitly seed the RNG. While the 'random' module auto-seeds on
+            # import, this call guarantees it is re-seeded with a new system
+            # entropy source, ensuring different results on each run.
+            random.seed()
+            filepaths = self.db.get_all_unique_filepaths()
+            random.shuffle(filepaths)
+            # Create results with a dummy score of 0.0, as score is irrelevant
+            results = [(0.0, path) for path in filepaths]
+            self.results_ready.emit(results)
+        except Exception as e:
+            logger.error("--- AN ERROR OCCURRED DURING RANDOM SEARCH ---")
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 

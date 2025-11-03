@@ -457,6 +457,15 @@ class ImageDatabase:
         ]
         return final_results if top_k == -1 else final_results[:top_k]
 
+    def get_all_unique_filepaths(self) -> List[str]:
+        """
+        Retrieves a list of all unique filepaths from the database, one per SHA.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT MIN(filepath) FROM filepaths GROUP BY sha256")
+        # fetchall() returns a list of tuples, e.g., [('path1',), ('path2',)]
+        return [row[0] for row in cursor.fetchall()]
+
     def search_similar_images(self, image_path: str, top_k: int = -1):
         query_path = Path(image_path)
         try:

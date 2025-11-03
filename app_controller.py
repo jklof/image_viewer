@@ -23,10 +23,11 @@ class AppController(QObject):
     # --- Signals to communicate with the worker thread ---
     request_text_search = Signal(str)
     request_image_search = Signal(str)
+    request_random_search = Signal()
     request_visualization = Signal()
     request_shutdown = Signal()
 
-    def __init__(self, main_window: "MainWindow"):
+    def __init__(self, main_window: "MainWindow", use_cpu_only: bool = False):
         super().__init__()
 
         if not main_window:
@@ -36,7 +37,7 @@ class AppController(QObject):
 
         # --- Backend Thread Management ---
         self.worker_thread = QThread()
-        self.backend_worker = BackendWorker()
+        self.backend_worker = BackendWorker(use_cpu_only=use_cpu_only)
         self.backend_worker.moveToThread(self.worker_thread)
 
         self._connect_signals()
@@ -59,6 +60,7 @@ class AppController(QObject):
         # are queued and executed in the worker thread.
         self.worker_thread.started.connect(self.backend_worker.initialize)
         self.request_text_search.connect(self.backend_worker.perform_text_search)
+        self.request_random_search.connect(self.backend_worker.perform_random_search)
         self.request_image_search.connect(self.backend_worker.perform_image_search)
         self.request_visualization.connect(self.backend_worker.request_visualization_data)
         self.request_shutdown.connect(self.backend_worker.shutdown)
@@ -76,9 +78,13 @@ class AppController(QObject):
 
     @Slot()
     def on_backend_initialized(self):
-        self.window.show_results_view()
-        self.window.set_controls_enabled(True)
-        self.window.update_status_bar("Backend ready. Enter text or select an image to explore.")
+        """
+        Once the backend is ready, trigger the initial random ordering of images.
+        """
+        self.window.clear_results()
+        self.window.show_loading_state("Loading initial random order...")
+        self.window.set_controls_enabled(False)
+        self.request_random_search.emit()
 
     @Slot(str)
     def on_backend_error(self, error_message: str):
@@ -93,7 +99,11 @@ class AppController(QObject):
         self.window.clear_results()
         self.window.show_loading_state("Ordering all images, please wait...")
         self.window.set_controls_enabled(False)
-        self.request_text_search.emit(query)
+
+        if query == "*":
+            self.request_random_search.emit()
+        else:
+            self.request_text_search.emit(query)
 
     @Slot(str)
     def on_image_search_requested(self, image_path: str):

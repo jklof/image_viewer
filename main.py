@@ -1,5 +1,6 @@
 import logging
 import sys
+import argparse
 
 from PySide6.QtWidgets import QApplication
 
@@ -14,6 +15,14 @@ logger = logging.getLogger(__name__)
 
 def main():
     """The main entry point for the application."""
+    parser = argparse.ArgumentParser(description="AI Image Explorer")
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Force the application to use the CPU for all ML computations, ignoring the GPU.",
+    )
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
 
     # Apply a dark theme if available
@@ -28,8 +37,8 @@ def main():
     # 1. Create the view (MainWindow)
     window = MainWindow()
 
-    # 2. Create the controller and inject the view dependency
-    controller = AppController(main_window=window)
+    # 2. Create the controller and inject the view dependency and cpu-only setting
+    controller = AppController(main_window=window, use_cpu_only=args.cpu_only)
 
     # 3. Initialize the application logic
     controller.initialize_app()
