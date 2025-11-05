@@ -8,16 +8,16 @@ from umap import UMAP
 import hdbscan
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder, EMBEDDING_SHAPE
+from config_utils import get_db_path
 import logging
 
 logger = logging.getLogger(__name__)
-
-DB_PATH = "images.db"
 
 
 class BackendWorker(QObject):
     error = Signal(str)
     initialized = Signal()
+    reloaded = Signal()  # Emitted after a successful data reload
     results_ready = Signal(list)
     status_update = Signal(str)
     visualization_data_ready = Signal(list)
@@ -34,11 +34,33 @@ class BackendWorker(QObject):
         try:
             logger.info("BackendWorker.initialize() starting in worker thread.")
             self.status_update.emit("Initializing backend... This may take a moment.")
+            db_path = get_db_path()
             self.embedder = ImageEmbedder(use_cpu_only=self.use_cpu_only)
-            self.db = ImageDatabase(db_path=DB_PATH, embedder=self.embedder)
+            self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
             self.initialized.emit()
         except Exception as e:
             logger.error("--- AN ERROR OCCURRED DURING INITIALIZATION ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
+
+    @Slot()
+    def perform_reload(self):
+        """
+        Reloads the in-memory embeddings from the database.
+        Used after a synchronization process has completed.
+        """
+        try:
+            logger.info("BackendWorker received request to reload data.")
+            self.status_update.emit("Reloading image data from database...")
+            if not self.db:
+                self.error.emit("Cannot reload, database connection is not available.")
+                return
+
+            self.db._load_embeddings_into_memory()
+            self.status_update.emit("Data reload complete.")
+            self.reloaded.emit()  # Signal completion
+        except Exception as e:
+            logger.error("--- AN ERROR OCCURRED DURING DATA RELOAD ---")
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
 
@@ -106,8 +128,6 @@ class BackendWorker(QObject):
             logger.error("--- AN ERROR OCCURRED DURING RANDOM SEARCH ---")
             logger.error(traceback.format_exc())
             self.error.emit(traceback.format_exc())
-
-    # REMOVED: perform_text_search and perform_image_search
 
     @Slot()
     def request_visualization_data(self):

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QAbstractItemView,
     QSplitter,
+    QProgressBar,
 )
 
 from query_builder import UniversalQueryBuilder
@@ -113,6 +114,8 @@ class MainWindow(QMainWindow):
     composite_search_triggered = Signal(list)
     visualization_triggered = Signal()
     random_order_triggered = Signal()
+    sync_triggered = Signal()
+    sync_cancel_triggered = Signal()
     closing = Signal()
 
     def __init__(self):
@@ -132,6 +135,12 @@ class MainWindow(QMainWindow):
             self.setGeometry(50, 50, 1200, 800)
 
     def _init_ui(self):
+        # --- Menu Bar ---
+        menu_bar = self.menuBar()
+        database_menu = menu_bar.addMenu("&Database")
+        self.sync_action = QAction("Synchronize Image Collection...", self)
+        database_menu.addAction(self.sync_action)
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -172,6 +181,36 @@ class MainWindow(QMainWindow):
         action_bar_layout.addWidget(self.random_order_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
         action_bar_layout.addWidget(self.visualize_btn)
+
+        # --- Sync Stack (Morphing Button/Status Bar) ---
+        self.sync_stack = QStackedWidget()
+        self.sync_stack.setMinimumWidth(250)
+
+        # Page 0: Idle Button
+        self.start_sync_btn = QPushButton("Synchronize")
+        self.start_sync_btn.setToolTip("Scan configured directories and update the database.")
+        self.sync_stack.addWidget(self.start_sync_btn)
+
+        # Page 1: Active Status Bar
+        sync_status_bar = QWidget()
+        status_layout = QHBoxLayout(sync_status_bar)
+        status_layout.setContentsMargins(5, 0, 5, 0)
+        self.sync_status_label = QLabel("Sync active...")
+        self.sync_progress_bar = QProgressBar()
+        self.sync_progress_bar.setTextVisible(False)
+        self.sync_cancel_btn = QPushButton("Cancel")
+        status_layout.addWidget(self.sync_status_label, 1)
+        status_layout.addWidget(self.sync_progress_bar, 2)
+        status_layout.addWidget(self.sync_cancel_btn)
+        self.sync_stack.addWidget(sync_status_bar)
+
+        # --- FIX: Constrain the height of the sync stack to match other buttons ---
+        reference_height = self.random_order_btn.sizeHint().height()
+        self.sync_stack.setMaximumHeight(reference_height)
+
+        action_bar_layout.addWidget(self.sync_stack)
+        # --- End Sync Stack ---
+
         content_layout.addLayout(action_bar_layout)
 
         self.content_stack = QStackedWidget()
@@ -235,6 +274,9 @@ class MainWindow(QMainWindow):
         self.visualizer_widget.image_selected.connect(self._on_visualizer_image_selected)
         self.random_order_btn.clicked.connect(self.random_order_triggered.emit)
         self.toggle_view_btn.clicked.connect(self._on_toggle_view_clicked)
+        self.sync_action.triggered.connect(self.sync_triggered.emit)
+        self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
+        self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
 
     def _update_toggle_view_button_state(self):
         is_enabled = self.results_model.rowCount() > 0
@@ -258,10 +300,39 @@ class MainWindow(QMainWindow):
         self.visualize_btn.setEnabled(enabled)
         self.query_builder.setEnabled(enabled)
         self.random_order_btn.setEnabled(enabled)
+        self.set_sync_controls_enabled(enabled)
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
         else:
             self._update_toggle_view_button_state()
+
+    # --- New Public Slots for Controller to manage Sync UI ---
+    def show_sync_active_view(self):
+        self.sync_stack.setCurrentIndex(1)
+        self.sync_cancel_btn.setEnabled(True)
+
+    def show_sync_idle_view(self):
+        self.sync_stack.setCurrentIndex(0)
+
+    def set_sync_controls_enabled(self, enabled: bool):
+        self.sync_action.setEnabled(enabled)
+        self.start_sync_btn.setEnabled(enabled)
+
+    def set_sync_cancel_button_enabled(self, enabled: bool):
+        self.sync_cancel_btn.setEnabled(enabled)
+
+    @Slot(str)
+    def update_sync_status(self, message: str):
+        self.sync_status_label.setText(message)
+
+    @Slot(str, int, int)
+    def update_sync_progress(self, stage: str, value: int, total: int):
+        self.sync_progress_bar.setRange(0, total)
+        self.sync_progress_bar.setValue(value)
+        if total > 0 and value > 0:
+            self.sync_status_label.setText(f"{stage.capitalize()}: {value}/{total}")
+        else:
+            self.sync_status_label.setText(stage.capitalize())
 
     def update_status_bar(self, message: str):
         self.statusBar().showMessage(message)

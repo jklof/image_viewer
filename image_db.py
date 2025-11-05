@@ -7,7 +7,7 @@ import concurrent.futures
 import os
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Callable
 
 import numpy as np
 from PIL import Image
@@ -171,6 +171,11 @@ class ImageDatabase:
     This version pre-loads embeddings into memory for fast, vectorized searching.
     """
 
+    class InterruptedError(Exception):
+        """Custom exception for clean cancellation handling."""
+
+        pass
+
     def __init__(self, db_path="images.db", embedder: ImageEmbedder = None):
         if not isinstance(embedder, ImageEmbedder):
             raise TypeError("An instance of ImageEmbedder is required for database operations.")
@@ -184,6 +189,7 @@ class ImageDatabase:
 
         self._shas_in_order: List[str] = []
         self._embedding_matrix: np.ndarray | None = None
+        self._cancel_flag = threading.Event()  # For cancelling sync
         self._load_embeddings_into_memory()
 
     def _create_tables(self):
@@ -239,120 +245,128 @@ class ImageDatabase:
     def _reconstruct_embedding(self, embedding_blob: bytes) -> np.ndarray:
         return np.frombuffer(embedding_blob, dtype=EMBEDDING_DTYPE).reshape(EMBEDDING_SHAPE)
 
-    def reconcile_database(self, configured_dirs: list[str]):
+    def cancel_sync(self):
+        """Sets a flag to gracefully interrupt the sync process."""
+        self._cancel_flag.set()
+
+    def reconcile_database(
+        self,
+        configured_dirs: list[str],
+        progress_callback: Callable = None,
+        status_callback: Callable = None,
+        check_cancelled_callback: Callable = None,
+    ):
         """
-        A resilient, parallelized synchronization method.
-        - Hashes files on multiple CPU cores.
-        - Embeds new images on the GPU concurrently.
-        - Work is checkpointed to the DB, making the process resumable.
+        A resilient, parallelized synchronization method with progress reporting and cancellation.
         """
-        logger.info("Starting database synchronization...")
+        self._cancel_flag.clear()  # Reset flag at the start of a new sync
 
-        # --- Phase 1: Discovery (Fast, Serial) ---
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT filepath, mtime FROM filepaths")
+        def _check_cancelled():
+            if self._cancel_flag.is_set() or (check_cancelled_callback and check_cancelled_callback()):
+                raise self.InterruptedError("Synchronization was cancelled.")
 
-        # --- MODIFICATION 1 (FIX): Avoid slow .resolve() on every DB entry. ---
-        # This is now a very fast, in-memory operation that just loads strings,
-        # avoiding hundreds of thousands of slow filesystem calls.
-        db_files = {row[0]: row[1] for row in cursor.fetchall()}
+        executor = concurrent.futures.ProcessPoolExecutor(max_workers=HASHING_WORKER_COUNT)
+        try:
+            logger.info("Starting database synchronization...")
+            if status_callback:
+                status_callback("Discovering files...")
+            _check_cancelled()
 
-        logger.info("Discovering image files on disk...")
-        all_image_paths = []
-        with tqdm(desc="Discovering files", unit=" files") as pbar:
+            # --- Phase 1: Discovery (Fast, Serial) ---
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT filepath, mtime FROM filepaths")
+            db_files = {row[0]: row[1] for row in cursor.fetchall()}
+
+            all_image_paths = []
             for directory in configured_dirs:
                 path = Path(directory)
                 if not path.is_dir():
-                    logger.warning(f"Configured directory '{directory}' does not exist. Skipping.")
                     continue
-
-                pbar.set_description(f"Scanning in {path.name}")
                 for p in path.rglob("*"):
                     if p.suffix.lower() in (".jpg", ".jpeg", ".png"):
                         all_image_paths.append(p)
-                        pbar.update(1)
+            _check_cancelled()
 
-        logger.info(f"Found {len(all_image_paths)} total image files on disk.")
+            disk_files: Dict[str, float] = {}
+            for p in all_image_paths:
+                try:
+                    disk_files[str(p.resolve())] = p.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+            _check_cancelled()
 
-        # --- MODIFICATION 2: Use strings as keys to match db_files. ---
-        disk_files: Dict[str, float] = {}
-        for p in tqdm(all_image_paths, desc="Checking file modification times"):
-            try:
-                # Resolve the path and convert to a canonical string for comparison.
-                disk_files[str(p.resolve())] = p.stat().st_mtime
-            except FileNotFoundError:
-                continue
+            db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
+            removed_paths = db_paths - disk_paths
+            added_paths = disk_paths - db_paths
+            potential_modified = disk_paths.intersection(db_paths)
+            modified_paths = {p for p in potential_modified if disk_files[p] > db_files[p]}
+            paths_to_process = [Path(p) for p in added_paths.union(modified_paths)]
 
-        # Now both sets contain canonical path strings, making the comparison very fast.
-        db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
-        removed_paths = db_paths - disk_paths
-        added_paths = disk_paths - db_paths
-        potential_modified_paths = disk_paths.intersection(db_paths)
+            _check_cancelled()
 
-        # Create a set of modified paths using string comparison first.
-        modified_string_paths = {p for p in potential_modified_paths if disk_files[p] > db_files[p]}
+            # --- Phase 2: Immediate Deletions ---
+            if removed_paths:
+                if status_callback:
+                    status_callback(f"Removing {len(removed_paths)} old files...")
+                with self.conn:
+                    placeholders = ", ".join("?" for _ in removed_paths)
+                    self.conn.execute(f"DELETE FROM filepaths WHERE filepath IN ({placeholders})", list(removed_paths))
 
-        logger.info(
-            f"Found {len(added_paths)} new, {len(removed_paths)} removed, "
-            f"and {len(modified_string_paths)} modified files."
-        )
-
-        # --- Phase 2: Immediate Deletions ---
-        if removed_paths:
-            logger.info(f"Removing {len(removed_paths)} missing files from database...")
-            with self.conn:
-                placeholders = ", ".join("?" for _ in removed_paths)
-                # The 'removed_paths' set already contains strings, so this is correct.
-                self.conn.execute(
-                    f"DELETE FROM filepaths WHERE filepath IN ({placeholders})",
-                    list(removed_paths),
+            if not paths_to_process:
+                logger.info("No new or modified files to process.")
+                self._cleanup_orphaned_embeddings()
+                if status_callback:
+                    status_callback("Updating visualization...")
+                self._update_visualization_data(
+                    status_callback=status_callback, check_cancelled_callback=_check_cancelled
                 )
+                self._load_embeddings_into_memory()
+                return
 
-        # --- MODIFICATION 3: Convert path strings back to Path objects for processing. ---
-        # The processing pool expects Path objects, so we convert the final set of strings.
-        string_paths_to_process = list(added_paths.union(modified_string_paths))
-        paths_to_process = [Path(p) for p in string_paths_to_process]
+            # --- Phase 3 & 4: Hashing and Embedding Pipeline ---
+            work_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
+            consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder)
+            consumer.start()
 
-        if not paths_to_process:
-            logger.info("No new or modified files to process.")
+            if status_callback:
+                status_callback(f"Processing {len(paths_to_process)} files...")
+
+            future_to_path = {executor.submit(_hash_file_worker, path): path for path in paths_to_process}
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_path)):
+                _check_cancelled()
+                result = future.result()
+                if result:
+                    while True:
+                        _check_cancelled()
+                        try:
+                            work_queue.put(result, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+                if progress_callback:
+                    progress_callback("hashing", i + 1, len(paths_to_process))
+
+            # --- Phase 5: Coordinated Shutdown ---
+            if status_callback:
+                status_callback("Embedding new images...")
+            work_queue.put(None)
+            while consumer.is_alive():
+                _check_cancelled()
+                consumer.join(timeout=0.2)
+
+            _check_cancelled()
             self._cleanup_orphaned_embeddings()
-            self._update_visualization_data()
-            return
 
-        # --- Phase 3: Setup Parallel Pipeline ---
-        work_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
-        consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder)
-        consumer.start()
+            if status_callback:
+                status_callback("Updating visualization...")
+            self._update_visualization_data(status_callback=status_callback, check_cancelled_callback=_check_cancelled)
 
-        # --- Phase 4: Run Hashing and Feed the Pipeline ---
-        logger.info(f"Hashing {len(paths_to_process)} files using {HASHING_WORKER_COUNT} processes...")
-        processed_count = 0
-        with tqdm(total=len(paths_to_process), desc="Processing files") as pbar:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=HASHING_WORKER_COUNT) as executor:
-                future_to_path = {executor.submit(_hash_file_worker, path): path for path in paths_to_process}
+            self._load_embeddings_into_memory()
 
-                for future in concurrent.futures.as_completed(future_to_path):
-                    result = future.result()
-                    if result:
-                        work_queue.put(result)
-
-                    pbar.update(1)
-                    processed_count += 1
-
-        logger.info(f"Hashing complete. Processed {processed_count} files.")
-
-        # --- Phase 5: Coordinated Shutdown ---
-        logger.info("Waiting for embedding and database writes to complete...")
-        work_queue.put(None)
-        consumer.join()
-
-        logger.info("All file processing tasks complete.")
-        self._cleanup_orphaned_embeddings()
-
-        # --- NEW: Final Step - Update visualization data if needed ---
-        self._update_visualization_data()
-
-        self._load_embeddings_into_memory()
+        finally:
+            logger.info("Shutting down process pool executor.")
+            executor.shutdown(wait=True, cancel_futures=True)
+            logger.info("Process pool executor shut down.")
 
     def _cleanup_orphaned_embeddings(self):
         """Removes embeddings that are no longer referenced by any file."""
@@ -364,33 +378,24 @@ class ImageDatabase:
             if res.rowcount > 0:
                 logger.info(f"Removed {res.rowcount} orphaned embeddings.")
 
-    # --- NEW METHOD to update visualization data ---
-    def _update_visualization_data(self):
+    def _update_visualization_data(self, status_callback: Callable = None, check_cancelled_callback: Callable = None):
         """
         Calculates and stores UMAP/HDBSCAN data if the set of images has changed.
         """
         logger.info("Checking if visualization data needs to be updated...")
         cursor = self.conn.cursor()
-
-        # Get all current shas from the main embeddings table
         cursor.execute("SELECT sha256 FROM embeddings")
         embedding_shas = {row[0] for row in cursor.fetchall()}
-
-        # Get all shas that already have visualization data
         cursor.execute("SELECT sha256 FROM visualization")
         visualization_shas = {row[0] for row in cursor.fetchall()}
 
-        # If the sets are identical, no work is needed
         if embedding_shas == visualization_shas:
             logger.info("Visualization data is already up to date.")
             return
 
         logger.info("Change detected. Recalculating all visualization data...")
-
         embedding_data = self.get_all_embeddings_with_shas()
         if not embedding_data:
-            logger.warning("No embeddings found to generate visualization.")
-            # Ensure the table is empty if there are no embeddings
             with self.conn:
                 self.conn.execute("DELETE FROM visualization")
             return
@@ -398,32 +403,29 @@ class ImageDatabase:
         all_embeddings = np.array([item["embedding"] for item in embedding_data])
         all_shas = [item["sha256"] for item in embedding_data]
 
-        logger.info("Performing UMAP reduction...")
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, verbose=True, n_jobs=-1)
+        if status_callback:
+            status_callback("Reducing dimensions (UMAP)...")
+        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, verbose=False, n_jobs=-1)
         coords_2d = reducer.fit_transform(all_embeddings)
+        if check_cancelled_callback:
+            check_cancelled_callback()
 
-        logger.info("Clustering with HDBSCAN...")
+        if status_callback:
+            status_callback("Clustering (HDBSCAN)...")
         clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=None, core_dist_n_jobs=-1)
         cluster_labels = clusterer.fit_predict(coords_2d)
+        if check_cancelled_callback:
+            check_cancelled_callback()
 
-        # Prepare data for bulk insertion
-        vis_data_to_commit = [
-            (
-                all_shas[i],
-                float(coords_2d[i, 0]),
-                float(coords_2d[i, 1]),
-                int(cluster_labels[i]),
-            )
+        vis_data = [
+            (all_shas[i], float(coords_2d[i, 0]), float(coords_2d[i, 1]), int(cluster_labels[i]))
             for i in range(len(all_shas))
         ]
 
-        logger.info(f"Saving visualization data for {len(vis_data_to_commit)} points...")
         with self.conn:
-            # Clear old data and insert the fresh calculations
             self.conn.execute("DELETE FROM visualization")
             self.conn.executemany(
-                "INSERT INTO visualization (sha256, coord_x, coord_y, cluster_id) VALUES (?, ?, ?, ?)",
-                vis_data_to_commit,
+                "INSERT INTO visualization (sha256, coord_x, coord_y, cluster_id) VALUES (?, ?, ?, ?)", vis_data
             )
         logger.info("Visualization data successfully updated.")
 
@@ -440,7 +442,6 @@ class ImageDatabase:
             {"embedding": self._reconstruct_embedding(eb).flatten(), "filepath": fp} for eb, fp in cursor.fetchall()
         ]
 
-    # --- NEW HELPER METHOD for visualization ---
     def get_all_embeddings_with_shas(self) -> List[Dict]:
         """Fetches all embeddings and their SHAs, optimized for visualization calculation."""
         cursor = self.conn.cursor()

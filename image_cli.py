@@ -6,6 +6,7 @@ import yaml
 
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
+from config_utils import get_scan_directories, get_db_path
 
 # Setup basic logging for the CLI. Set to WARNING to keep the output clean,
 # but allow module-level loggers (like ml_core) to print INFO if needed.
@@ -14,29 +15,10 @@ logger = logging.getLogger(__name__)
 # Specifically set the logger for this script to INFO for our status messages.
 
 
-def load_config(config_path="config.yml") -> list[str] | None:
-    """Loads the list of directories to scan from the YAML configuration file."""
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-            if "directories" in config and isinstance(config["directories"], list):
-                return config["directories"]
-            else:
-                logger.error(f"Error: Config file '{config_path}' is missing a 'directories' list or it is malformed.")
-                return None
-    except FileNotFoundError:
-        logger.error(f"Error: Configuration file '{config_path}' not found.")
-        logger.error("Please create it and add the directories you want to scan.")
-        return None
-    except yaml.YAMLError as e:
-        logger.error(f"Error parsing YAML file '{config_path}': {e}")
-        return None
-
-
 def handle_sync(db: ImageDatabase, args: argparse.Namespace):
     """Handles the database synchronization command."""
     logger.info(f"Loading directories to scan from '{args.config}'...")
-    directories_to_scan = load_config(args.config)
+    directories_to_scan = get_scan_directories(args.config)
     if directories_to_scan:
         logger.info("Starting database synchronization. This may take a while...")
         db.reconcile_database(directories_to_scan)
@@ -79,8 +61,8 @@ def main():
     parser.add_argument(
         "--db-path",
         type=str,
-        default="images.db",
-        help="Path to the SQLite database file.",
+        default=None,  # Default to None to prioritize config file
+        help="Path to the SQLite database file (overrides config.yml).",
     )
     parser.add_argument("--config", type=str, default="config.yml", help="Path to the config.yml file.")
 
@@ -120,8 +102,11 @@ def main():
             logger.info("Initializing...")
             embedder = ImageEmbedder(use_cpu_only=args.cpu_only)
 
-            logger.info(f"Opening database at '{args.db_path}'...")
-            db = ImageDatabase(db_path=args.db_path, embedder=embedder)
+            # Prioritize command-line arg, fall back to config file
+            db_path = args.db_path if args.db_path else get_db_path(args.config)
+
+            logger.info(f"Opening database at '{db_path}'...")
+            db = ImageDatabase(db_path=db_path, embedder=embedder)
 
             # Dispatch to the appropriate handler function
             args.func(db, args)
