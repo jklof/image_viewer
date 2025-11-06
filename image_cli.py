@@ -3,10 +3,11 @@ import logging
 from pathlib import Path
 import sys
 import yaml
+from tqdm import tqdm
 
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
-from config_utils import get_scan_directories, get_db_path
+from config_utils import get_scan_directories, get_db_path, get_model_id
 
 # Setup basic logging for the CLI. Set to WARNING to keep the output clean,
 # but allow module-level loggers (like ml_core) to print INFO if needed.
@@ -19,12 +20,38 @@ def handle_sync(db: ImageDatabase, args: argparse.Namespace):
     """Handles the database synchronization command."""
     logger.info(f"Loading directories to scan from '{args.config}'...")
     directories_to_scan = get_scan_directories(args.config)
-    if directories_to_scan:
-        logger.info("Starting database synchronization. This may take a while...")
-        db.reconcile_database(directories_to_scan)
-        logger.info("Synchronization complete.")
-    else:
+    if not directories_to_scan:
         logger.warning("No directories were loaded from the config. Nothing to do.")
+        return
+
+    logger.info("Starting database synchronization. This may take a while...")
+
+    # --- TQDM Progress Bar Setup ---
+    pbar = None  # Keep a reference to the progress bar
+
+    def cli_progress_callback(stage: str, current: int, total: int):
+        nonlocal pbar
+        if stage == 'hashing':
+            if pbar is None:
+                pbar = tqdm(total=total, desc="Hashing files", unit=" file", ncols=100)
+            # Update the progress bar to the current value
+            pbar.update(current - pbar.n)
+
+    def cli_status_callback(message: str):
+        # Use tqdm.write to print messages without breaking the progress bar
+        tqdm.write(f"-> {message}")
+
+    try:
+        db.reconcile_database(
+            configured_dirs=directories_to_scan,
+            progress_callback=cli_progress_callback,
+            status_callback=cli_status_callback,
+        )
+        logger.info("Synchronization complete.")
+    finally:
+        # Ensure the progress bar is closed even if an error occurs
+        if pbar:
+            pbar.close()
 
 
 def handle_search_image(db: ImageDatabase, args: argparse.Namespace):
@@ -100,7 +127,10 @@ def main():
         # This avoids loading the large ML model for commands like '--help'.
         if hasattr(args, "func"):
             logger.info("Initializing...")
-            embedder = ImageEmbedder(use_cpu_only=args.cpu_only)
+
+            # Load model ID from config, respecting the --config argument
+            model_id = get_model_id(args.config)
+            embedder = ImageEmbedder(model_id=model_id, use_cpu_only=args.cpu_only)
 
             # Prioritize command-line arg, fall back to config file
             db_path = args.db_path if args.db_path else get_db_path(args.config)
@@ -113,6 +143,10 @@ def main():
         else:
             parser.print_help()
 
+    except ImageDatabase.ModelMismatchError as e:
+        logger.error("--- DATABASE AND MODEL ARE INCOMPATIBLE ---")
+        logger.error(str(e))
+        sys.exit(1)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         sys.exit(1)

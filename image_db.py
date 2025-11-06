@@ -17,7 +17,7 @@ from tqdm import tqdm
 import umap
 import hdbscan
 
-from ml_core import EMBEDDING_DTYPE, EMBEDDING_SHAPE, ImageEmbedder
+from ml_core import ImageEmbedder
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,11 @@ class ImageDatabase:
 
         pass
 
+    class ModelMismatchError(Exception):
+        """Custom exception for when the DB model and app model conflict."""
+
+        pass
+
     def __init__(self, db_path="images.db", embedder: ImageEmbedder = None):
         if not isinstance(embedder, ImageEmbedder):
             raise TypeError("An instance of ImageEmbedder is required for database operations.")
@@ -186,6 +191,7 @@ class ImageDatabase:
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA foreign_keys = ON;")
         self._create_tables()
+        self._verify_model_compatibility()
 
         self._shas_in_order: List[str] = []
         self._embedding_matrix: np.ndarray | None = None
@@ -212,7 +218,6 @@ class ImageDatabase:
                 )
                 """
             )
-            # --- NEW TABLE FOR VISUALIZATION DATA ---
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS visualization (
@@ -224,6 +229,58 @@ class ImageDatabase:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+
+    def _get_metadata(self, key: str) -> str | None:
+        """Retrieves a value from the metadata table."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT value FROM metadata WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _set_metadata(self, key: str, value: str):
+        """Sets a key-value pair in the metadata table."""
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, value))
+
+    def _verify_model_compatibility(self):
+        """Checks if the embedder model matches the one stored in the DB."""
+        db_model_id = self._get_metadata("model_id")
+        # If a model ID is stored and it doesn't match the current embedder, raise an error.
+        if db_model_id and db_model_id != self.embedder.model_id:
+            raise self.ModelMismatchError(
+                f"Database was created with model '{db_model_id}', but application is configured "
+                f"to use '{self.embedder.model_id}'. Please update config.yml or run a new sync."
+            )
+
+    def _reconcile_model_id(self):
+        """
+        Ensures the DB is stamped with the correct model ID. If the model has
+        changed, this will wipe all incompatible data before proceeding.
+        """
+        db_model_id = self._get_metadata("model_id")
+        config_model_id = self.embedder.model_id
+
+        if db_model_id != config_model_id:
+            if db_model_id is not None:
+                logger.warning(
+                    f"CONFIG-DB MODEL MISMATCH: Config model is '{config_model_id}' but DB was built "
+                    f"with '{db_model_id}'. All existing embeddings will be deleted to rebuild the database."
+                )
+                with self.conn:
+                    self.conn.execute("DELETE FROM embeddings")
+                    self.conn.execute("DELETE FROM visualization")
+            else:
+                logger.info(f"Stamping new database with model ID: '{config_model_id}'")
+
+            self._set_metadata("model_id", config_model_id)
 
     def _load_embeddings_into_memory(self):
         logger.info("Loading embeddings from database into memory...")
@@ -243,7 +300,7 @@ class ImageDatabase:
         logger.info(f"Loaded {len(self._shas_in_order)} embeddings into memory cache.")
 
     def _reconstruct_embedding(self, embedding_blob: bytes) -> np.ndarray:
-        return np.frombuffer(embedding_blob, dtype=EMBEDDING_DTYPE).reshape(EMBEDDING_SHAPE)
+        return np.frombuffer(embedding_blob, dtype=self.embedder.embedding_dtype).reshape(self.embedder.embedding_shape)
 
     def cancel_sync(self):
         """Sets a flag to gracefully interrupt the sync process."""
@@ -254,7 +311,6 @@ class ImageDatabase:
         configured_dirs: list[str],
         progress_callback: Callable = None,
         status_callback: Callable = None,
-        check_cancelled_callback: Callable = None,
     ):
         """
         A resilient, parallelized synchronization method with progress reporting and cancellation.
@@ -262,12 +318,17 @@ class ImageDatabase:
         self._cancel_flag.clear()  # Reset flag at the start of a new sync
 
         def _check_cancelled():
-            if self._cancel_flag.is_set() or (check_cancelled_callback and check_cancelled_callback()):
+            if self._cancel_flag.is_set():
                 raise self.InterruptedError("Synchronization was cancelled.")
 
         executor = concurrent.futures.ProcessPoolExecutor(max_workers=HASHING_WORKER_COUNT)
         try:
             logger.info("Starting database synchronization...")
+
+            # --- Phase 0: Model ID Reconciliation ---
+            # This must happen before any processing. Wipes data if model changed.
+            self._reconcile_model_id()
+
             if status_callback:
                 status_callback("Discovering files...")
             _check_cancelled()
@@ -276,6 +337,8 @@ class ImageDatabase:
             cursor = self.conn.cursor()
             cursor.execute("SELECT filepath, mtime FROM filepaths")
             db_files = {row[0]: row[1] for row in cursor.fetchall()}
+
+            logger.info("Scanning configured directories for image files...")
 
             all_image_paths = []
             for directory in configured_dirs:
@@ -287,6 +350,8 @@ class ImageDatabase:
                         all_image_paths.append(p)
             _check_cancelled()
 
+            logger.info(f"Discovered {len(all_image_paths)} image files on disk.")
+
             disk_files: Dict[str, float] = {}
             for p in all_image_paths:
                 try:
@@ -294,6 +359,8 @@ class ImageDatabase:
                 except FileNotFoundError:
                     continue
             _check_cancelled()
+
+            logger.info("Comparing database records with on-disk files...")
 
             db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
             removed_paths = db_paths - disk_paths
@@ -324,6 +391,8 @@ class ImageDatabase:
                 return
 
             # --- Phase 3 & 4: Hashing and Embedding Pipeline ---
+            logger.info(f"Processing {len(paths_to_process)} new or modified files...")
+
             work_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
             consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder)
             consumer.start()
@@ -355,7 +424,10 @@ class ImageDatabase:
                 consumer.join(timeout=0.2)
 
             _check_cancelled()
+            logger.info("Cleanup: Removing orphaned embeddings...")
             self._cleanup_orphaned_embeddings()
+
+            logger.info("Recalculating visualization data...")
 
             if status_callback:
                 status_callback("Updating visualization...")

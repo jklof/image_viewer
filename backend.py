@@ -7,8 +7,8 @@ from PIL import Image
 from umap import UMAP
 import hdbscan
 from image_db import ImageDatabase
-from ml_core import ImageEmbedder, EMBEDDING_SHAPE
-from config_utils import get_db_path
+from ml_core import ImageEmbedder
+from config_utils import get_db_path, get_model_id
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,10 +34,21 @@ class BackendWorker(QObject):
         try:
             logger.info("BackendWorker.initialize() starting in worker thread.")
             self.status_update.emit("Initializing backend... This may take a moment.")
+
             db_path = get_db_path()
-            self.embedder = ImageEmbedder(use_cpu_only=self.use_cpu_only)
+            model_id = get_model_id()
+
+            self.status_update.emit(f"Loading model '{model_id}'...")
+            self.embedder = ImageEmbedder(model_id=model_id, use_cpu_only=self.use_cpu_only)
+
+            self.status_update.emit("Connecting to database...")
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
+
             self.initialized.emit()
+        except ImageDatabase.ModelMismatchError as e:
+            logger.error("--- DATABASE AND MODEL ARE INCOMPATIBLE ---")
+            logger.error(str(e))
+            self.error.emit(str(e))
         except Exception as e:
             logger.error("--- AN ERROR OCCURRED DURING INITIALIZATION ---")
             logger.error(traceback.format_exc())
@@ -72,8 +83,8 @@ class BackendWorker(QObject):
             logger.info(f"Performing composite search with {len(query_elements)} elements.")
             self.status_update.emit(f"Building query from {len(query_elements)} elements...")
 
-            # Initialize a zero vector for the final query
-            combined_vector = np.zeros(EMBEDDING_SHAPE, dtype=np.float32)
+            # Initialize a zero vector for the final query, now dynamically sized
+            combined_vector = np.zeros(self.embedder.embedding_shape, dtype=self.embedder.embedding_dtype)
 
             for element in query_elements:
                 element_type = element["type"]

@@ -8,22 +8,15 @@ from transformers import CLIPModel, CLIPProcessor
 
 logger = logging.getLogger(__name__)
 
-# The best single model that fits comfortably in 8GB VRAM.
-MODEL_ID = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
-
-# The embedding dimension for ViT-H is 1024.
-EMBEDDING_DTYPE = np.float32
-EMBEDDING_SHAPE = (1, 1024)
-
 
 class ImageEmbedder:
     """
-    An embedder that uses a single, powerful CLIP model (ViT-H-14) for
-    state-of-the-art search performance with excellent efficiency.
-    Can be configured to run on CPU only.
+    An embedder that uses a configurable CLIP model for state-of-the-art
+    search performance. It dynamically determines embedding size from the
+    loaded model. Can be configured to run on CPU only.
     """
 
-    def __init__(self, use_cpu_only: bool = False):
+    def __init__(self, model_id: str, use_cpu_only: bool = False):
         if use_cpu_only:
             self.device = "cpu"
         else:
@@ -35,12 +28,21 @@ class ImageEmbedder:
         # Use default precision (float32) for CPU as float16 can be slower.
         model_kwargs = {}
         if self.device == "cuda":
-            model_kwargs["dtype"] = torch.float16
+            model_kwargs["torch_dtype"] = torch.float16
 
-        logger.info(f"Loading model '{MODEL_ID}'...")
-        self.model = CLIPModel.from_pretrained(MODEL_ID, **model_kwargs).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(MODEL_ID)
+        logger.info(f"Loading model '{model_id}'...")
+        self.model = CLIPModel.from_pretrained(model_id, **model_kwargs).to(self.device)
+        self.processor = CLIPProcessor.from_pretrained(model_id)
         logger.info("Model loaded successfully.")
+
+        # --- Dynamically determine and store model properties ---
+        self.model_id = model_id
+        # The embedding dimension is found in the model's config.
+        embedding_dim = self.model.config.projection_dim
+        self.embedding_shape = (1, embedding_dim)
+        self.embedding_dtype = np.float32
+
+        logger.info(f"Model '{model_id}' loaded with embedding dimension {embedding_dim}.")
 
     @torch.no_grad()
     def embed_image(self, image: Image.Image) -> np.ndarray:
@@ -48,7 +50,7 @@ class ImageEmbedder:
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         features = self.model.get_image_features(**inputs)
         features /= features.norm(dim=-1, keepdim=True)
-        return features.cpu().numpy().astype(EMBEDDING_DTYPE)
+        return features.cpu().numpy().astype(self.embedding_dtype)
 
     @torch.no_grad()
     def embed_text(self, text: str) -> np.ndarray:
@@ -56,7 +58,7 @@ class ImageEmbedder:
         inputs = self.processor(text=text, return_tensors="pt").to(self.device)
         features = self.model.get_text_features(**inputs)
         features /= features.norm(dim=-1, keepdim=True)
-        return features.cpu().numpy().astype(EMBEDDING_DTYPE)
+        return features.cpu().numpy().astype(self.embedding_dtype)
 
     @torch.no_grad()
     def embed_batch(self, images: List[Image.Image], batch_size: int = 4) -> List[np.ndarray]:
@@ -67,5 +69,5 @@ class ImageEmbedder:
             inputs = self.processor(images=batch, return_tensors="pt", padding=True).to(self.device)
             features = self.model.get_image_features(**inputs)
             features /= features.norm(dim=-1, keepdim=True)
-            all_embeddings.extend([emb.cpu().numpy().astype(EMBEDDING_DTYPE) for emb in features])
+            all_embeddings.extend([emb.cpu().numpy().astype(self.embedding_dtype) for emb in features])
         return all_embeddings

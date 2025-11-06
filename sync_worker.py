@@ -3,7 +3,7 @@ import traceback
 from PySide6.QtCore import QObject, Signal, Slot
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
-from config_utils import get_scan_directories, get_db_path
+from config_utils import get_scan_directories, get_db_path, get_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,12 @@ class SyncWorker(QObject):
             self._is_cancelled = False
             logger.info("SyncWorker starting.")
             self.status_update.emit("Initializing...")
-            db_path = get_db_path()
 
-            self.embedder = ImageEmbedder(use_cpu_only=self.use_cpu_only)
+            db_path = get_db_path()
+            model_id = get_model_id()
+
+            self.status_update.emit(f"Loading model '{model_id}'...")
+            self.embedder = ImageEmbedder(model_id=model_id, use_cpu_only=self.use_cpu_only)
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
 
             if self._is_cancelled:
@@ -54,7 +57,6 @@ class SyncWorker(QObject):
                 configured_dirs=directories_to_scan,
                 progress_callback=self.handle_progress,
                 status_callback=self.handle_status,
-                check_cancelled_callback=self.is_cancelled,
             )
 
             result, message = "success", "Synchronization complete."
@@ -77,10 +79,6 @@ class SyncWorker(QObject):
         self._is_cancelled = True
         if self.db:
             self.db.cancel_sync()  # Propagate cancellation to the DB layer
-
-    def is_cancelled(self) -> bool:
-        """Callback for the DB layer to check for cancellation."""
-        return self._is_cancelled
 
     def handle_progress(self, stage: str, current: int, total: int):
         self.progress_update.emit(stage, current, total)

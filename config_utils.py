@@ -7,11 +7,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = "config.yml"
 DEFAULT_DB_PATH = "images.db"
 DEFAULT_DIRECTORIES = []  # Start with an empty list
+DEFAULT_MODEL_ID = "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"  # A good default (768 dim)
 
 # The canonical structure of a default config file
 DEFAULT_CONFIG = {
     "database_path": DEFAULT_DB_PATH,
     "directories": DEFAULT_DIRECTORIES,
+    "model_id": DEFAULT_MODEL_ID,
 }
 
 
@@ -57,6 +59,10 @@ def get_scan_directories(config_path: str = DEFAULT_CONFIG_PATH) -> List[str]:
 def get_db_path(config_path: str = DEFAULT_CONFIG_PATH) -> str:
     """Convenience function to get the database path."""
     config = load_config(config_path)
-    res = config.get("database_path", DEFAULT_DB_PATH)
-    print(f"Database path from config: {res}")
-    return res
+    return config.get("database_path", DEFAULT_DB_PATH)
+
+
+def get_model_id(config_path: str = DEFAULT_CONFIG_PATH) -> str:
+    """Convenience function to get the Hugging Face model ID."""
+    config = load_config(config_path)
+    return config.get("model_id", DEFAULT_MODEL_ID)
