@@ -11,9 +11,6 @@ from typing import Dict, List, Set, Callable
 
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
-
-# --- NEW IMPORTS for visualization calculation ---
 import umap
 import hdbscan
 
@@ -22,29 +19,29 @@ from ml_core import ImageEmbedder
 logger = logging.getLogger(__name__)
 
 # --- Configuration for the new parallel pipeline ---
-# Number of CPU cores to use for hashing files.
+# Hashing workers are only used for the small set of added/modified files now.
 HASHING_WORKER_COUNT = max(1, os.cpu_count() // 2)
-# How many items the embedding thread will pull from the queue at once.
 EMBEDDING_BATCH_SIZE = 32
-# Max size of the queue connecting the hashers and the embedder.
-# This prevents hashers from getting too far ahead and using too much memory.
 PIPELINE_QUEUE_SIZE = 256
 
 
-def _hash_file_worker(filepath: Path) -> tuple[Path, str, float] | None:
+# NOTE: Worker now accepts a Path object that is NOT necessarily resolved,
+# but is the path string we want to store in the DB.
+def _targeted_hashing_worker(filepath: Path, mtime: float) -> tuple[Path, str, float] | None:
     """
-    A standalone function for use in a ProcessPoolExecutor.
-    Calculates SHA256 and mtime for a given file path.
-    Returns None if the file cannot be read.
+    Worker to perform the hash for the targeted file.
+    The filepath passed is the canonical path string that will be stored in the DB.
     """
     try:
-        mtime = filepath.stat().st_mtime
+        # File I/O for hashing
         sha256_hash = hashlib.sha256()
         with open(filepath, "rb") as f:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
+
+        # Returns the canonical Path object, the SHA, and the original mtime
         return filepath, sha256_hash.hexdigest(), mtime
-    except (IOError, FileNotFoundError):
+    except (IOError, FileNotFoundError, OSError):
         return None
 
 
@@ -106,6 +103,7 @@ class EmbeddingConsumerThread(threading.Thread):
             return
 
         # Separate data for easier processing
+        # Note: fp is now the canonical (resolved) Path object from the worker
         filepaths = [item[0] for item in batch]
         shas = [item[1] for item in batch]
         mtimes = [item[2] for item in batch]
@@ -321,22 +319,25 @@ class ImageDatabase:
             if self._cancel_flag.is_set():
                 raise self.InterruptedError("Synchronization was cancelled.")
 
+        # Re-initializing executor here for targeted use
         executor = concurrent.futures.ProcessPoolExecutor(max_workers=HASHING_WORKER_COUNT)
         try:
             logger.info("Starting database synchronization...")
 
             # --- Phase 0: Model ID Reconciliation ---
-            # This must happen before any processing. Wipes data if model changed.
             self._reconcile_model_id()
-
-            if status_callback:
-                status_callback("Discovering files...")
             _check_cancelled()
 
-            # --- Phase 1: Discovery (Fast, Serial) ---
+            # --- Phase 1: Discovery (Optimized String-Based Check) ---
+            if status_callback:
+                status_callback("Discovering files...")
+
             cursor = self.conn.cursor()
+            # db_files is our canonical reference: {path_str: mtime}
+            # NOTE: These path strings were GENERATED via .resolve() in the past.
             cursor.execute("SELECT filepath, mtime FROM filepaths")
             db_files = {row[0]: row[1] for row in cursor.fetchall()}
+            db_paths = set(db_files.keys())
 
             logger.info("Scanning configured directories for image files...")
 
@@ -348,30 +349,47 @@ class ImageDatabase:
                 for p in path.rglob("*"):
                     if p.suffix.lower() in (".jpg", ".jpeg", ".png"):
                         all_image_paths.append(p)
-            _check_cancelled()
+                _check_cancelled()
 
             logger.info(f"Discovered {len(all_image_paths)} image files on disk.")
 
-            disk_files: Dict[str, float] = {}
+            # --- Phase 2: SINGLE-THREADED STRING/MTIME CHECK (AVOIDS resolve() bottleneck) ---
+            # We must use the *current* string representation for lookup.
+            # This is the trade-off: FAST but risks missing a symlink change.
+            if status_callback:
+                status_callback(f"Analyzing {len(all_image_paths)} files for changes (String Check)...")
+
+            disk_files_candidate: Dict[str, float] = {}
+            # Store the Path object corresponding to the candidate string
+            candidate_path_obj: Dict[str, Path] = {}
+
             for p in all_image_paths:
                 try:
-                    disk_files[str(p.resolve())] = p.stat().st_mtime
+                    # **SPEEDUP HERE**: Use str(p) or str(p.absolute()) (faster than resolve())
+                    # Using str(p.absolute()) is safer for cross-OS/mount consistency.
+                    candidate_path_str = str(p.absolute())
+                    disk_files_candidate[candidate_path_str] = p.stat().st_mtime
+                    candidate_path_obj[candidate_path_str] = p
                 except FileNotFoundError:
                     continue
             _check_cancelled()
 
             logger.info("Comparing database records with on-disk files...")
 
-            db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
-            removed_paths = db_paths - disk_paths
-            added_paths = disk_paths - db_paths
-            potential_modified = disk_paths.intersection(db_paths)
-            modified_paths = {p for p in potential_modified if disk_files[p] > db_files[p]}
-            paths_to_process = [Path(p) for p in added_paths.union(modified_paths)]
+            # --- Perform Comparison and Identify Sets ---
+            disk_paths_candidate = set(disk_files_candidate.keys())
 
-            _check_cancelled()
+            # A file is REMOVED if its canonical DB path is NOT in the new candidates
+            removed_paths = db_paths - disk_paths_candidate
 
-            # --- Phase 2: Immediate Deletions ---
+            added_paths_candidate = disk_paths_candidate - db_paths  # New path string
+            potential_modified = disk_paths_candidate.intersection(db_paths)
+
+            modified_paths_candidate = {p for p in potential_modified if disk_files_candidate[p] > db_files[p]}
+
+            paths_to_hash_candidate = added_paths_candidate.union(modified_paths_candidate)
+
+            # --- Phase 3: Immediate Deletions ---
             if removed_paths:
                 if status_callback:
                     status_callback(f"Removing {len(removed_paths)} old files...")
@@ -379,7 +397,8 @@ class ImageDatabase:
                     placeholders = ", ".join("?" for _ in removed_paths)
                     self.conn.execute(f"DELETE FROM filepaths WHERE filepath IN ({placeholders})", list(removed_paths))
 
-            if not paths_to_process:
+            if not paths_to_hash_candidate:
+                # ... (No new or modified files to process, jump to cleanup/visualization)
                 logger.info("No new or modified files to process.")
                 self._cleanup_orphaned_embeddings()
                 if status_callback:
@@ -390,30 +409,44 @@ class ImageDatabase:
                 self._load_embeddings_into_memory()
                 return
 
-            # --- Phase 3 & 4: Hashing and Embedding Pipeline ---
-            logger.info(f"Processing {len(paths_to_process)} new or modified files...")
+            # --- Phase C & 4: Targeted Parallel Hashing and Embedding Pipeline ---
+            logger.info(f"Hashing {len(paths_to_hash_candidate)} new or modified files...")
 
             work_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
             consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder)
             consumer.start()
 
             if status_callback:
-                status_callback(f"Processing {len(paths_to_process)} files...")
+                status_callback(f"Hashing {len(paths_to_hash_candidate)} files...")
 
-            future_to_path = {executor.submit(_hash_file_worker, path): path for path in paths_to_process}
+            # Prepare the jobs for the Targeted Hashing Worker: (Path object, mtime)
+            hashing_jobs = []
+            for candidate_str in paths_to_hash_candidate:
+                path_obj = candidate_path_obj[candidate_str]
+                mtime = disk_files_candidate[candidate_str]
+                hashing_jobs.append((path_obj, mtime))
+
+            future_to_path = {
+                executor.submit(_targeted_hashing_worker, path_obj, mtime): path_obj for path_obj, mtime in hashing_jobs
+            }
+
+            # Collect results from the Hashing Worker and feed the Embedding Consumer
             for i, future in enumerate(concurrent.futures.as_completed(future_to_path)):
                 _check_cancelled()
-                result = future.result()
+                result = future.result()  # result is (Path, SHA, mtime)
                 if result:
+                    # Pass directly to the embedding queue
                     while True:
                         _check_cancelled()
                         try:
+                            # Path object is the one used for the DB key
                             work_queue.put(result, timeout=0.2)
                             break
                         except queue.Full:
                             continue
+
                 if progress_callback:
-                    progress_callback("hashing", i + 1, len(paths_to_process))
+                    progress_callback("hashing", i + 1, len(hashing_jobs))
 
             # --- Phase 5: Coordinated Shutdown ---
             if status_callback:

@@ -31,7 +31,7 @@ def handle_sync(db: ImageDatabase, args: argparse.Namespace):
 
     def cli_progress_callback(stage: str, current: int, total: int):
         nonlocal pbar
-        if stage == 'hashing':
+        if stage == "hashing":
             if pbar is None:
                 pbar = tqdm(total=total, desc="Hashing files", unit=" file", ncols=100)
             # Update the progress bar to the current value
