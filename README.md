@@ -29,6 +29,34 @@ conda activate image-viewer-dev
 Create a `config.yml` file in the project root and add the paths to your image folders:
 ```yaml
 # config.yml
+# --- Model Configuration ---
+# The Hugging Face model ID for the CLIP model used for generating embeddings.
+# WARNING: Changing this requires a full database re-sync, as embeddings
+# generated with different models are incompatible.
+# Recommended Models (Sorted by Increasing Size/Quality):
+# 
+# openai/clip-vit-base-patch32: 
+#   Size: 512 dim | VRAM: ~0.5GB | Speed: Fastest | Quality: Good Baseline
+# 
+# laion/CLIP-ViT-B-32-laion2B-s34B-b79K: 
+#   Size: 512 dim | VRAM: ~0.6GB | Speed: Very Fast | Quality: Good Baseline (Better data)
+# 
+# openai/clip-vit-large-patch14: 
+#   Size: 768 dim | VRAM: ~1.3GB | Speed: Fast | Quality: Excellent (Commonly used default)
+# 
+# laion/CLIP-ViT-L-14-laion2B-s32B-b82K: 
+#   Size: 768 dim | VRAM: ~1.5GB | Speed: Moderate | Quality: Excellent (LAION-trained default)
+# 
+# laion/CLIP-ViT-H-14-laion2B-s32B-b79K:
+#   Size: 1024 dim | VRAM: ~3.5GB | Speed: Slower | Quality: Top Tier
+model_id: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+
+# Location where the database file will be written to
+database_path: "image.db"
+
+# --- Directory Configuration ---
+# List the full paths to the directories you want to scan for images.
+# The 'sync' command will use these directories to keep the database up-to-date.
 directories:
   - "/path/to/your/photos"
   - "C:/Users/YourName/Pictures"
