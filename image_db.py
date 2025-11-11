@@ -586,6 +586,12 @@ class ImageDatabase:
         # fetchall() returns a list of tuples, e.g., [('path1',), ('path2',)]
         return [row[0] for row in cursor.fetchall()]
 
+    def get_all_filepaths_with_mtime(self) -> List[tuple[str, float]]:
+        """Retrieves all filepaths and their modification times."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT filepath, mtime FROM filepaths")
+        return cursor.fetchall()
+
     def search_similar_images(self, image_path: str, top_k: int = -1):
         query_path = Path(image_path)
         try:

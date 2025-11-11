@@ -141,6 +141,31 @@ class BackendWorker(QObject):
             self.error.emit(traceback.format_exc())
 
     @Slot()
+    def perform_sort_by_date(self):
+        """Sorts all images by their modification timestamp, newest first."""
+        if not self.db:
+            return
+        try:
+            logger.info("Performing sort by modification date.")
+            self.status_update.emit("Sorting all images by date...")
+
+            # Fetch filepaths and their timestamps
+            files_with_mtime = self.db.get_all_filepaths_with_mtime()
+
+            # Sort by mtime (the second element) in descending order
+            files_with_mtime.sort(key=lambda x: x[1], reverse=True)
+
+            # Format for the view: [(score, filepath), ...]
+            # Score is irrelevant here, so we use 0.0
+            results = [(0.0, path) for path, mtime in files_with_mtime]
+
+            self.results_ready.emit(results)
+        except Exception as e:
+            logger.error("--- AN ERROR OCCURRED DURING SORT BY DATE ---")
+            logger.error(traceback.format_exc())
+            self.error.emit(traceback.format_exc())
+
+    @Slot()
     def request_visualization_data(self):
         if not self.db:
             self.error.emit("Database not initialized for visualization request.")

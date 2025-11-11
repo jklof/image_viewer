@@ -24,6 +24,7 @@ class AppController(QObject):
     # --- Signals to communicate with the worker thread ---
     request_composite_search = Signal(list)
     request_random_search = Signal()
+    request_sort_by_date = Signal()
     request_visualization = Signal()
     request_shutdown = Signal()
     request_reload = Signal()  # Signal to the BackendWorker to reload its data
@@ -63,6 +64,7 @@ class AppController(QObject):
         self.window.visualization_triggered.connect(self.on_visualization_requested)
         self.window.closing.connect(self.on_main_window_closing)
         self.window.random_order_triggered.connect(self.on_random_order_requested)
+        self.window.sort_by_date_triggered.connect(self.on_sort_by_date_requested)
         self.window.sync_triggered.connect(self.on_sync_requested)
         self.window.sync_cancel_triggered.connect(self.on_sync_cancel_requested)
 
@@ -70,6 +72,7 @@ class AppController(QObject):
         self.worker_thread.started.connect(self.backend_worker.initialize)
         self.request_composite_search.connect(self.backend_worker.perform_composite_search)
         self.request_random_search.connect(self.backend_worker.perform_random_search)
+        self.request_sort_by_date.connect(self.backend_worker.perform_sort_by_date)
         self.request_visualization.connect(self.backend_worker.request_visualization_data)
         self.request_shutdown.connect(self.backend_worker.shutdown)
         self.request_reload.connect(self.backend_worker.perform_reload)
@@ -117,6 +120,14 @@ class AppController(QObject):
         self.window.show_loading_state("Randomly reordering images...")
         self.window.set_controls_enabled(False)
         self.request_random_search.emit()
+
+    @Slot()
+    def on_sort_by_date_requested(self):
+        """Handles the request to sort all images by modification date."""
+        self.window.clear_results()
+        self.window.show_loading_state("Sorting images by date (newest first)...")
+        self.window.set_controls_enabled(False)
+        self.request_sort_by_date.emit()
 
     @Slot()
     def on_visualization_requested(self):

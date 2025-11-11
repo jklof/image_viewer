@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
     composite_search_triggered = Signal(list)
     visualization_triggered = Signal()
     random_order_triggered = Signal()
+    sort_by_date_triggered = Signal()
     sync_triggered = Signal()
     sync_cancel_triggered = Signal()
     closing = Signal()
@@ -161,13 +162,17 @@ class MainWindow(QMainWindow):
 
         action_bar_layout = QHBoxLayout()
         action_bar_layout.setSpacing(10)
-        
+
         # --- MODIFICATION: Use a consistent fixed height for all buttons in this row ---
         ACTION_BAR_BUTTON_HEIGHT = 35
 
         self.random_order_btn = QPushButton("Random Order")
         self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
+
+        self.sort_by_date_btn = QPushButton("Sort by Date")  # NEW BUTTON
+        self.sort_by_date_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
+        self.sort_by_date_btn.setToolTip("Sort all images by modification date (newest first).")
 
         self.toggle_view_btn = QPushButton("Single View")
         self.toggle_view_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
@@ -180,13 +185,14 @@ class MainWindow(QMainWindow):
 
         action_bar_layout.addStretch()
         action_bar_layout.addWidget(self.random_order_btn)
+        action_bar_layout.addWidget(self.sort_by_date_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
         action_bar_layout.addWidget(self.visualize_btn)
 
         # --- Sync Stack (Morphing Button/Status Bar) ---
         self.sync_stack = QStackedWidget()
         self.sync_stack.setMinimumWidth(250)
-        self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT) # Constrain the stack itself
+        self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)  # Constrain the stack itself
 
         # Page 0: Idle Button
         self.start_sync_btn = QPushButton("Synchronize")
@@ -271,6 +277,7 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
         self.visualizer_widget.image_selected.connect(self._on_visualizer_image_selected)
         self.random_order_btn.clicked.connect(self.random_order_triggered.emit)
+        self.sort_by_date_btn.clicked.connect(self.sort_by_date_triggered.emit)
         self.toggle_view_btn.clicked.connect(self._on_toggle_view_clicked)
         self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
         self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
@@ -297,6 +304,7 @@ class MainWindow(QMainWindow):
         self.visualize_btn.setEnabled(enabled)
         self.query_builder.setEnabled(enabled)
         self.random_order_btn.setEnabled(enabled)
+        self.sort_by_date_btn.setEnabled(enabled)
         self.set_sync_controls_enabled(enabled)
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
