@@ -151,9 +151,9 @@ def main():
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        if db:
-            logger.info("Closing database connection.")
-            db.close()
+        # The ImageDatabase object no longer holds a persistent connection,
+        # so there is no need to call a .close() method.
+        pass
 
 
 if __name__ == "__main__":

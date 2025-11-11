@@ -88,8 +88,7 @@ class SyncWorker(QObject):
 
     def cleanup(self):
         """Closes database connections and cleans up resources."""
-        if self.db:
-            self.db.close()
-            self.db = None
+        # The ImageDatabase object no longer needs to be explicitly closed.
+        self.db = None
         self.embedder = None
         logger.info("SyncWorker cleaned up resources.")
