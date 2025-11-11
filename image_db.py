@@ -53,7 +53,9 @@ class EmbeddingConsumerThread(threading.Thread):
     """
 
     def __init__(self, db_path: str, work_queue: queue.Queue, embedder: ImageEmbedder):
-        super().__init__(daemon=True)
+        # By removing `daemon=True`, this becomes a non-daemon thread.
+        # The main application will wait for it to finish before exiting.
+        super().__init__()
         self.db_path = db_path
         self.work_queue = work_queue
         self.embedder = embedder
@@ -144,8 +146,14 @@ class EmbeddingConsumerThread(threading.Thread):
                     logger.warning(f"Could not load image {path} for embedding. Skipping. Error: {e}")
 
             if pil_images:
-                embeddings = self.embedder.embed_batch(pil_images)
-                new_embeddings_to_commit = [(sha, emb.tobytes()) for sha, emb in zip(valid_shas, embeddings)]
+                try:
+                    embeddings = self.embedder.embed_batch(pil_images)
+                    new_embeddings_to_commit = [(sha, emb.tobytes()) for sha, emb in zip(valid_shas, embeddings)]
+                except Exception as e:
+                    # Log the error but allow the sync to continue.
+                    # The failed batch of images will not be added to the embeddings table.
+                    logger.error(f"Failed to embed a batch of {len(pil_images)} images. Error: {e}", exc_info=True)
+                    # new_embeddings_to_commit will remain an empty list, which is the correct state.
 
         # --- Commit everything in a single transaction ---
         with self.conn:
@@ -193,6 +201,7 @@ class ImageDatabase:
 
         self._shas_in_order: List[str] = []
         self._embedding_matrix: np.ndarray | None = None
+        self._sha_to_path_map_cache: Dict | None = None
         self._cancel_flag = threading.Event()  # For cancelling sync
         self._load_embeddings_into_memory()
 
@@ -281,6 +290,9 @@ class ImageDatabase:
             self._set_metadata("model_id", config_model_id)
 
     def _load_embeddings_into_memory(self):
+        # Invalidate the filepath cache since the data might be changing.
+        self._sha_to_path_map_cache = None
+
         logger.info("Loading embeddings from database into memory...")
         cursor = self.conn.cursor()
         cursor.execute("SELECT sha256, embedding FROM embeddings")
@@ -365,11 +377,15 @@ class ImageDatabase:
 
             for p in all_image_paths:
                 try:
-                    # **SPEEDUP HERE**: Use str(p) or str(p.absolute()) (faster than resolve())
-                    # Using str(p.absolute()) is safer for cross-OS/mount consistency.
-                    candidate_path_str = str(p.absolute())
+                    # Create an absolute version of the path once.
+                    absolute_path = p.absolute()
+
+                    # Use the string representation of the absolute path for the key.
+                    candidate_path_str = str(absolute_path)
                     disk_files_candidate[candidate_path_str] = p.stat().st_mtime
-                    candidate_path_obj[candidate_path_str] = p
+
+                    # Store the absolute Path object itself. This is the fix.
+                    candidate_path_obj[candidate_path_str] = absolute_path
                 except FileNotFoundError:
                     continue
             _check_cancelled()
@@ -435,14 +451,20 @@ class ImageDatabase:
                 _check_cancelled()
                 result = future.result()  # result is (Path, SHA, mtime)
                 if result:
-                    # Pass directly to the embedding queue
+                    # This loop no longer busy-waits. It attempts to put an item
+                    # and will sleep efficiently for up to 1 second if the queue is full.
                     while True:
-                        _check_cancelled()
                         try:
-                            # Path object is the one used for the DB key
-                            work_queue.put(result, timeout=0.2)
+                            # Use a longer timeout to allow the thread to sleep
+                            # instead of spinning.
+                            work_queue.put(result, timeout=1.0)
+                            # If the put was successful, we can exit the inner loop.
                             break
                         except queue.Full:
+                            # The queue was full for the entire timeout duration.
+                            # Check for cancellation before trying again.
+                            _check_cancelled()
+                            # Loop again to re-attempt the put.
                             continue
 
                 if progress_callback:
@@ -451,11 +473,16 @@ class ImageDatabase:
             # --- Phase 5: Coordinated Shutdown ---
             if status_callback:
                 status_callback("Embedding new images...")
-            work_queue.put(None)
-            while consumer.is_alive():
-                _check_cancelled()
-                consumer.join(timeout=0.2)
 
+            # Signal the consumer that no more items are coming.
+            work_queue.put(None)
+
+            # Block and wait until the consumer thread has processed every item
+            # in the queue and has terminated. This prevents data loss.
+            consumer.join()
+
+            # It's still good practice to check for cancellation here, in case the
+            # user cancelled while the consumer was processing its final batch.
             _check_cancelled()
             logger.info("Cleanup: Removing orphaned embeddings...")
             self._cleanup_orphaned_embeddings()
@@ -510,15 +537,27 @@ class ImageDatabase:
 
         if status_callback:
             status_callback("Reducing dimensions (UMAP)...")
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, verbose=False, n_jobs=-1)
-        coords_2d = reducer.fit_transform(all_embeddings)
+        try:
+            reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, verbose=False, n_jobs=-1)
+            coords_2d = reducer.fit_transform(all_embeddings)
+        except Exception as e:
+            logger.error(f"UMAP failed during visualization calculation. Skipping update. Error: {e}", exc_info=True)
+            # Exit gracefully, leaving the old visualization data intact.
+            return
+
         if check_cancelled_callback:
             check_cancelled_callback()
 
         if status_callback:
             status_callback("Clustering (HDBSCAN)...")
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=None, core_dist_n_jobs=-1)
-        cluster_labels = clusterer.fit_predict(coords_2d)
+        try:
+            clusterer = hdbscan.HDBSCAN(min_cluster_size=5, min_samples=None, core_dist_n_jobs=-1)
+            cluster_labels = clusterer.fit_predict(coords_2d)
+        except Exception as e:
+            logger.error(f"HDBSCAN failed during visualization calculation. Skipping update. Error: {e}", exc_info=True)
+            # Exit gracefully, leaving the old visualization data intact.
+            return
+
         if check_cancelled_callback:
             check_cancelled_callback()
 
@@ -555,9 +594,25 @@ class ImageDatabase:
             {"sha256": sha, "embedding": self._reconstruct_embedding(eb).flatten()} for sha, eb in cursor.fetchall()
         ]
 
+    def _build_sha_to_path_map(self):
+        """Builds a cache mapping each SHA to a list of its filepaths."""
+        logger.info("Building SHA-to-filepath cache...")
+        sha_to_path_map = defaultdict(list)
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT sha256, filepath FROM filepaths")
+        for sha, path in cursor.fetchall():
+            sha_to_path_map[sha].append(path)
+        self._sha_to_path_map_cache = sha_to_path_map
+        logger.info(f"Cache built with {len(self._sha_to_path_map_cache)} unique SHAs.")
+
     def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> List[tuple[float, str]]:
         if self._embedding_matrix is None or len(self._embedding_matrix) == 0:
             return []
+
+        # Check if the cache needs to be built.
+        if self._sha_to_path_map_cache is None:
+            self._build_sha_to_path_map()
+
         similarities = np.dot(query_embedding, self._embedding_matrix.T).flatten()
         if top_k != -1 and top_k < len(similarities):
             top_indices = np.argpartition(similarities, -top_k)[-top_k:]
@@ -567,13 +622,10 @@ class ImageDatabase:
             all_indices = np.argsort(similarities)[::-1]
             top_results = [(similarities[i], self._shas_in_order[i]) for i in all_indices]
 
-        sha_to_path_map = defaultdict(list)
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT sha256, filepath FROM filepaths")
-        for sha, path in cursor.fetchall():
-            sha_to_path_map[sha].append(path)
         final_results = [
-            (float(score), sha_to_path_map[sha][0]) for score, sha in top_results if sha in sha_to_path_map
+            (float(score), self._sha_to_path_map_cache[sha][0])
+            for score, sha in top_results
+            if sha in self._sha_to_path_map_cache
         ]
         return final_results if top_k == -1 else final_results[:top_k]
 
