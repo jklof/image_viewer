@@ -45,6 +45,10 @@ class AppController(QObject):
         self.sync_thread = None
         self.sync_worker = None
 
+        # --- Visualization Caching ---
+        self._cached_visualization_data = None
+        self._visualization_data_dirty = True
+
         self._connect_signals()
 
     def initialize_app(self):
@@ -116,6 +120,18 @@ class AppController(QObject):
 
     @Slot()
     def on_visualization_requested(self):
+        # --- MODIFIED LOGIC ---
+        # If data is clean and already cached, show it immediately.
+        if not self._visualization_data_dirty and self._cached_visualization_data is not None:
+            logger.info("Displaying cached visualization data.")
+            # The data is already in the widget, just switch the view
+            self.window.show_visualizer_view()
+            self.window.update_status_bar(
+                f"Visualization complete. Plotted {len(self._cached_visualization_data)} points."
+            )
+            return
+
+        # Otherwise, proceed with the full data loading sequence.
         self.window.show_loading_state("Loading visualization data...")
         self.window.set_controls_enabled(False)
         self.request_visualization.emit()
@@ -156,6 +172,12 @@ class AppController(QObject):
         logger.info(f"Sync process finished. Result: {result}, Message: {message}")
         self.window.update_status_bar(message)
 
+        # --- MODIFIED LOGIC ---
+        # Mark visualization data as dirty since the database has changed.
+        self._visualization_data_dirty = True
+        self._cached_visualization_data = None
+        logger.info("Visualization data cache has been invalidated due to sync completion.")
+
         # Clean up the thread and worker
         if self.sync_thread:
             self.sync_thread.quit()
@@ -185,6 +207,12 @@ class AppController(QObject):
 
     @Slot(list)
     def on_visualization_data_ready(self, plot_data: list):
+        # --- MODIFIED LOGIC ---
+        # Cache the newly received data and mark it as clean.
+        self._cached_visualization_data = plot_data
+        self._visualization_data_dirty = False
+        logger.info(f"Cached {len(plot_data)} visualization data points.")
+
         if not plot_data:
             self.window.show_results_view()
             self.window.set_controls_enabled(True)

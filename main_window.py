@@ -103,11 +103,19 @@ class SingleImageViewer(QWidget):
             pixmap = self.image_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
             drag.setPixmap(pixmap)
 
-            # --- FIX: Set the hot spot to the CENTER of the thumbnail. ---
+            # Set the hot spot to the CENTER of the thumbnail.
             # This makes the drag operation feel natural, as if holding the image from its middle.
             drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
 
             drag.exec(Qt.DropAction.CopyAction)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        """On double-click, signal to return to the grid view."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.closed.emit()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -135,11 +143,6 @@ class MainWindow(QMainWindow):
             self.setGeometry(50, 50, 1200, 800)
 
     def _init_ui(self):
-        # --- Menu Bar ---
-        menu_bar = self.menuBar()
-        database_menu = menu_bar.addMenu("&Database")
-        self.sync_action = QAction("Synchronize Image Collection...", self)
-        database_menu.addAction(self.sync_action)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -158,25 +161,23 @@ class MainWindow(QMainWindow):
 
         action_bar_layout = QHBoxLayout()
         action_bar_layout.setSpacing(10)
+        
+        # --- MODIFICATION: Use a consistent fixed height for all buttons in this row ---
+        ACTION_BAR_BUTTON_HEIGHT = 35
 
         self.random_order_btn = QPushButton("Random Order")
-        self.random_order_btn.setMinimumHeight(35)
+        self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
 
         self.toggle_view_btn = QPushButton("Single View")
-        self.toggle_view_btn.setMinimumHeight(35)
+        self.toggle_view_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.toggle_view_btn.setToolTip("Toggle between grid and single image view.")
         self.toggle_view_btn.setEnabled(False)
 
         self.visualize_btn = QPushButton("Visualize Embeddings")
-        self.visualize_btn.setMinimumHeight(35)
+        self.visualize_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.visualize_btn.setToolTip("View a 2D visualization of all image embeddings.")
-        self.visualize_btn.setStyleSheet(
-            """
-            QPushButton { background-color: #55aaff; color: white; border-radius: 8px; }
-            QPushButton:disabled { background-color: #404040; color: #808080; border: 1px solid #505050; }
-            """
-        )
+
         action_bar_layout.addStretch()
         action_bar_layout.addWidget(self.random_order_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
@@ -185,6 +186,7 @@ class MainWindow(QMainWindow):
         # --- Sync Stack (Morphing Button/Status Bar) ---
         self.sync_stack = QStackedWidget()
         self.sync_stack.setMinimumWidth(250)
+        self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT) # Constrain the stack itself
 
         # Page 0: Idle Button
         self.start_sync_btn = QPushButton("Synchronize")
@@ -203,10 +205,6 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.sync_progress_bar, 2)
         status_layout.addWidget(self.sync_cancel_btn)
         self.sync_stack.addWidget(sync_status_bar)
-
-        # --- FIX: Constrain the height of the sync stack to match other buttons ---
-        reference_height = self.random_order_btn.sizeHint().height()
-        self.sync_stack.setMaximumHeight(reference_height)
 
         action_bar_layout.addWidget(self.sync_stack)
         # --- End Sync Stack ---
@@ -274,7 +272,6 @@ class MainWindow(QMainWindow):
         self.visualizer_widget.image_selected.connect(self._on_visualizer_image_selected)
         self.random_order_btn.clicked.connect(self.random_order_triggered.emit)
         self.toggle_view_btn.clicked.connect(self._on_toggle_view_clicked)
-        self.sync_action.triggered.connect(self.sync_triggered.emit)
         self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
         self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
 
@@ -315,7 +312,6 @@ class MainWindow(QMainWindow):
         self.sync_stack.setCurrentIndex(0)
 
     def set_sync_controls_enabled(self, enabled: bool):
-        self.sync_action.setEnabled(enabled)
         self.start_sync_btn.setEnabled(enabled)
 
     def set_sync_cancel_button_enabled(self, enabled: bool):
