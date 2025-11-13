@@ -1,6 +1,5 @@
 import yaml
 import logging
-from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +16,7 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict:
+def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
     """Loads the configuration from a YAML file, applying defaults for missing keys."""
     try:
         with open(config_path, "r") as f:
@@ -40,7 +39,7 @@ def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict:
         return DEFAULT_CONFIG.copy()
 
 
-def save_config(config: Dict, config_path: str = DEFAULT_CONFIG_PATH):
+def save_config(config: dict, config_path: str = DEFAULT_CONFIG_PATH):
     """Saves the configuration to a YAML file."""
     try:
         with open(config_path, "w") as f:
@@ -50,7 +49,7 @@ def save_config(config: Dict, config_path: str = DEFAULT_CONFIG_PATH):
         logger.error(f"Error saving configuration to '{config_path}': {e}")
 
 
-def get_scan_directories(config_path: str = DEFAULT_CONFIG_PATH) -> List[str]:
+def get_scan_directories(config_path: str = DEFAULT_CONFIG_PATH) -> list[str]:
     """Convenience function to get only the list of directories to scan."""
     config = load_config(config_path)
     return config.get("directories", [])

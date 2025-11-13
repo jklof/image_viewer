@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-import typing
 
 from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl
 from PySide6.QtGui import (
@@ -37,8 +36,6 @@ from loading_spinner import PulsingSpinner
 from ui_components import SearchResultDelegate, FILEPATH_ROLE
 from virtual_model import ImageResultModel
 
-if typing.TYPE_CHECKING:
-    from app_controller import AppController
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +141,6 @@ class MainWindow(QMainWindow):
             self.setGeometry(50, 50, 1200, 800)
 
     def _init_ui(self):
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -163,14 +159,14 @@ class MainWindow(QMainWindow):
         action_bar_layout = QHBoxLayout()
         action_bar_layout.setSpacing(10)
 
-        # --- MODIFICATION: Use a consistent fixed height for all buttons in this row ---
+        # --- Use a consistent fixed height for all buttons in this row ---
         ACTION_BAR_BUTTON_HEIGHT = 35
 
         self.random_order_btn = QPushButton("Random Order")
         self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
 
-        self.sort_by_date_btn = QPushButton("Sort by Date")  # NEW BUTTON
+        self.sort_by_date_btn = QPushButton("Sort by Date")
         self.sort_by_date_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.sort_by_date_btn.setToolTip("Sort all images by modification date (newest first).")
 
@@ -302,16 +298,15 @@ class MainWindow(QMainWindow):
 
     def set_controls_enabled(self, enabled: bool):
         self.visualize_btn.setEnabled(enabled)
-        self.query_builder.setEnabled(enabled)
+        self.query_builder.set_interactive_controls_enabled(enabled)
         self.random_order_btn.setEnabled(enabled)
         self.sort_by_date_btn.setEnabled(enabled)
-        self.set_sync_controls_enabled(enabled)
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
         else:
             self._update_toggle_view_button_state()
 
-    # --- New Public Slots for Controller to manage Sync UI ---
+    # --- Slots for Controller to manage Sync UI ---
     def show_sync_active_view(self):
         self.sync_stack.setCurrentIndex(1)
         self.sync_cancel_btn.setEnabled(True)
@@ -324,6 +319,21 @@ class MainWindow(QMainWindow):
 
     def set_sync_cancel_button_enabled(self, enabled: bool):
         self.sync_cancel_btn.setEnabled(enabled)
+
+    def show_sync_prompt_view(self):
+        """
+        Displays a message prompting the user to sync the database
+        when no images are found on startup.
+        """
+        self.loading_spinner.stop_animation()
+        self.loading_message_label.setText("No images found.\n\nPlease Synchronize to build your database.")
+        self.loading_message_label.setStyleSheet("font-size: 18px; color: #ccc;")
+        self.content_stack.setCurrentWidget(self.loading_overlay_widget)
+
+        self.set_controls_enabled(False)
+        self.set_sync_controls_enabled(True)
+        self.show_sync_idle_view()
+        self.update_status_bar("Ready. Please run a sync to begin.")
 
     @Slot(str)
     def update_sync_status(self, message: str):
@@ -343,6 +353,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def show_loading_state(self, message: str):
+        self.loading_message_label.setStyleSheet("font-size: 16px; color: #aaa;")
         self.loading_message_label.setText(message)
         self.loading_spinner.start_animation(QColor(85, 170, 255))
         self.content_stack.setCurrentWidget(self.loading_overlay_widget)
