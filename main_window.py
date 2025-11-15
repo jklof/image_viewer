@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QSizePolicy,
     QStatusBar,
     QMessageBox,
     QListView,
@@ -162,6 +163,7 @@ class MainWindow(QMainWindow):
         # --- Use a consistent fixed height for all buttons in this row ---
         ACTION_BAR_BUTTON_HEIGHT = 35
 
+        # --- Group 1: Left-aligned action buttons ---
         self.random_order_btn = QPushButton("Random Order")
         self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
@@ -179,16 +181,18 @@ class MainWindow(QMainWindow):
         self.visualize_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.visualize_btn.setToolTip("View a 2D visualization of all image embeddings.")
 
-        action_bar_layout.addStretch()
         action_bar_layout.addWidget(self.random_order_btn)
         action_bar_layout.addWidget(self.sort_by_date_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
         action_bar_layout.addWidget(self.visualize_btn)
 
-        # --- Sync Stack (Morphing Button/Status Bar) ---
+        # --- Spacer: Pushes the next widgets to the right ---
+        action_bar_layout.addStretch()
+
+        # --- Group 2: Right-aligned sync controls ---
         self.sync_stack = QStackedWidget()
         self.sync_stack.setMinimumWidth(250)
-        self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)  # Constrain the stack itself
+        self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
 
         # Page 0: Idle Button
         self.start_sync_btn = QPushButton("Synchronize")
@@ -261,6 +265,7 @@ class MainWindow(QMainWindow):
         self.loading_message_label.setText("Initializing, please wait...")
         self.loading_spinner.start_animation(QColor(85, 170, 255))
         self.set_controls_enabled(False)
+        self.set_sync_controls_enabled(False) 
 
     def _connect_ui_signals(self):
         self.query_builder.search_triggered.connect(self.composite_search_triggered.emit)

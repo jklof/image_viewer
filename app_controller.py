@@ -124,6 +124,7 @@ class AppController(QObject):
         self.window.show_results_view()
         self.window.update_status_bar(f"Ordering complete. Displaying all {len(results)} images.")
         self.window.set_controls_enabled(True)
+        self.window.set_sync_controls_enabled(True)
 
     @Slot(list)
     def on_visualization_data_ready(self, plot_data: list):
