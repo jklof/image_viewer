@@ -38,8 +38,20 @@ def create_list_item(score: float, filepath: str) -> "QStandardItem":  # Forward
 
 
 def create_placeholder_icon() -> QIcon:
+    """Creates a placeholder icon with text."""
     pixmap = QPixmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
-    pixmap.fill(QColor(45, 45, 45))
+    pixmap.fill(QColor(40, 40, 40)) # Dark gray background
+    
+    painter = QPainter(pixmap)
+    painter.setPen(QColor(100, 100, 100)) # Lighter gray text
+    font = painter.font()
+    font.setPointSize(10)
+    painter.setFont(font)
+    
+    # Draw "Loading..." in the center
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "Loading...")
+    painter.end()
+    
     return QIcon(pixmap)
 
 

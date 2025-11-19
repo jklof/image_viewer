@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
 NUM_WORKERS = 8
+MAX_PENDING_JOBS = 100  # New: Limit queue size
 
 
 class ThumbnailCache:
@@ -129,6 +130,19 @@ class LoaderManager(QObject):
             if filepath in self.pending_jobs:
                 return
 
+            # --- NEW: Cap the queue size ---
+            # If queue is full, drop the oldest item (the one at the bottom/right)
+            # This ensures we only process what is currently on screen (LIFO)
+            while len(self.queue) >= MAX_PENDING_JOBS:
+                try:
+                    discarded = self.queue.pop() # Remove oldest
+                    self.pending_jobs.discard(discarded)
+                    # We removed an item but the semaphore count is still high.
+                    # The worker will handle this empty slot gracefully.
+                except IndexError:
+                    break
+            # -------------------------------
+
             self.pending_jobs.add(filepath)
             # Add to the FRONT of the queue (LIFO priority).
             self.queue.appendleft(filepath)
@@ -158,8 +172,16 @@ class LoaderManager(QObject):
                 self.semaphore.release(1)
                 return None
 
-            # Take from the FRONT of the queue (LIFO).
-            return self.queue.popleft()
+            # --- NEW: Safe pop ---
+            try:
+                # Take from the FRONT of the queue (LIFO).
+                return self.queue.popleft()
+            except IndexError:
+                # This happens if we dropped items in request_thumbnail.
+                # The semaphore let us in, but the queue is empty.
+                # Return None so the worker simply loops again.
+                return None
+            # ---------------------
 
     def job_finished(self, filepath: str, image: QImage | None):
         """
