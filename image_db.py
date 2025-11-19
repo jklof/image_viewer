@@ -25,6 +25,10 @@ EMBEDDING_BATCH_SIZE = 64
 PIPELINE_QUEUE_SIZE = 256
 SQLITE_VARIABLE_LIMIT = 900  # A safe limit for IN clauses
 
+# Define a safety limit (approx 80 Megapixels).
+# Standard PIL limit is ~178MP. We set it lower to keep the UI responsive.
+MAX_IMAGE_PIXELS = 80 * 1000 * 1000
+
 
 def _targeted_hashing_worker(filepath: Path, mtime: float) -> tuple[Path, str, float] | None:
     """
@@ -90,9 +94,6 @@ class EmbeddingConsumerThread(threading.Thread):
         finally:
             # This block runs on BOTH graceful shutdown and cancellation.
             if self.cancel_flag.is_set():
-                # If we were cancelled, drain the queue of any pending data.
-                # This is critical to unblock the producer thread which might be
-                # waiting on a full queue to put the `None` sentinel.
                 logger.info("Cancellation detected. Draining work queue to unblock producer...")
                 while not self.work_queue.empty():
                     try:
@@ -108,7 +109,6 @@ class EmbeddingConsumerThread(threading.Thread):
     def _process_batch(self, batch: list[tuple[Path, str, float]]):
         if not batch:
             return
-        # A safeguard check, although the main loop is the primary gatekeeper.
         if self.cancel_flag.is_set():
             return
 
@@ -145,20 +145,43 @@ class EmbeddingConsumerThread(threading.Thread):
 
             for sha, path in zip(shas_to_embed, image_paths_to_load):
                 try:
-                    pil_images.append(Image.open(path).convert("RGB"))
+                    # 1. Open lazily
+                    img = Image.open(path)
+
+                    # 2. Safety Check: Skip massive images (Decompression Bombs)
+                    if getattr(img, "_getexif", None):
+                        pass  # Force header load
+
+                    # Check dimensions before loading pixel data
+                    total_pixels = img.width * img.height
+                    if total_pixels > MAX_IMAGE_PIXELS:
+                        logger.warning(f"Skipping too large image ({img.width}x{img.height}): {path}")
+                        continue
+
+                    # 3. Pre-processing: Convert
+                    img = img.convert("RGB")
+
+                    # 4. Optimization: Downscale large images BEFORE embedding.
+                    # CLIP models usually take 224x224 or 336x336 input.
+                    # Keeping 4K+ images in the batch consumes massive RAM/VRAM for no benefit.
+                    # We resize to max 1024x1024 to be safe but fast.
+                    if max(img.size) > 1024:
+                        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+
+                    pil_images.append(img)
                     temp_valid_shas.append(sha)
+
                 except Exception as e:
                     logger.warning(f"Could not load image {path}. Skipping. Error: {e}")
-                    # Note: We do NOT add this SHA to temp_valid_shas
 
             if pil_images:
                 try:
+                    logger.debug(f"Embedding batch of {len(pil_images)} images...")
                     embeddings = self.embedder.embed_batch(pil_images)
                     new_embeddings_to_commit = [(sha, emb.tobytes()) for sha, emb in zip(temp_valid_shas, embeddings)]
                     valid_new_shas.update(temp_valid_shas)
                 except Exception as e:
                     logger.error(f"Failed to embed batch. Error: {e}", exc_info=True)
-                    # If the whole batch fails embedding, valid_new_shas remains empty
 
         with self.conn:
             if new_embeddings_to_commit:
@@ -167,8 +190,6 @@ class EmbeddingConsumerThread(threading.Thread):
                 )
 
             # Calculate the set of SHAs that are legally present in the embeddings table now.
-            # 1. SHAs that were there before (existing_shas_in_db)
-            # 2. SHAs we just added successfully (valid_new_shas)
             safe_shas = existing_shas_in_db.union(valid_new_shas)
 
             filepath_data = []
@@ -176,7 +197,7 @@ class EmbeddingConsumerThread(threading.Thread):
                 if sha in safe_shas:
                     filepath_data.append((str(fp), sha, mt))
                 else:
-                    # This happens if the image was 'new' but failed to load/embed.
+                    # This happens if the image was 'new' but failed to load/embed (e.g. too big).
                     # We skip inserting it into filepaths to prevent FK violation.
                     pass
 
