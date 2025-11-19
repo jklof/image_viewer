@@ -11,8 +11,9 @@ from PySide6.QtCore import (
     QSemaphore,
     QMetaObject,
     Q_ARG,
+    QSize,
 )
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtGui import QPixmap, QImage, QImageReader
 from ui_components import THUMBNAIL_SIZE
 
 import logging
@@ -74,31 +75,40 @@ class PersistentWorker(QRunnable):
                 try:
                     filepath = self.manager.get_next_job()
                     if filepath:
-                        # --- Actual Work Logic ---
-                        # Check cache first
+                        # 1. Check cache first
                         if thumbnail_cache.get(filepath):
                             self.manager.job_finished(filepath, None)
                             continue
 
-                        # Load as QImage (Thread Safe)
-                        image = QImage(filepath)
-                        if not image.isNull():
-                            scaled = image.scaled(
-                                THUMBNAIL_SIZE,
-                                THUMBNAIL_SIZE,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation,
-                            )
-                            self.manager.job_finished(filepath, scaled)
-                        else:
-                            # Even if loading fails, we mark job as finished
+                        # 2. Optimized Loading with QImageReader
+                        reader = QImageReader(filepath)
+
+                        # Check if readable (fast check)
+                        if not reader.canRead():
                             self.manager.job_finished(filepath, None)
+                            continue
+
+                        # Scale-on-load: Much faster than loading full res then scaling
+                        reader.setScaledSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
+
+                        # Optional: Quality vs Speed trade-off.
+                        # If scrolling is still choppy, comment out SmoothTransformation.
+                        # reader.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+
+                        image = reader.read()
+
+                        if not image.isNull():
+                            self.manager.job_finished(filepath, image)
+                        else:
+                            self.manager.job_finished(filepath, None)
+
                 except Exception:
                     # Catch individual job failures so the worker keeps running
                     # unless it's a shutdown issue.
                     if self.manager._is_shutting_down:
                         break
-                    logger.debug(f"Worker encountered error processing job:\n{traceback.format_exc()}")
+                    # Log debug, but don't spam error logs for corrupt images
+                    logger.debug(f"Error loading thumbnail for {filepath}")
 
         except (KeyboardInterrupt, SystemExit):
             # Allow standard python exit signals to pass cleanly
@@ -107,7 +117,7 @@ class PersistentWorker(QRunnable):
             # Catch catastrophic failures (e.g. QImage bindings destroyed)
             # Log only if not shutting down, otherwise suppress to avoid noise
             if not self.manager._is_shutting_down:
-                logger.error(f"PersistentWorker thread crashed:\n{traceback.format_exc()}")
+                logger.error(f"PersistentWorker crashed:\n{traceback.format_exc()}")
 
 
 class LoaderManager(QObject):

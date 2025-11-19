@@ -2,19 +2,15 @@ import logging
 import numpy as np
 from PIL import Image
 
-# All heavy imports are now inside methods/constructors.
-
 logger = logging.getLogger(__name__)
 
 
 class ImageEmbedder:
     """
-    An embedder that uses a configurable CLIP model. JIT imports ensure
-    that heavy libraries are only loaded when an instance is created.
+    An embedder that uses a configurable CLIP model.
     """
 
     def __init__(self, model_id: str, use_cpu_only: bool = False):
-        # --- Heavy imports happen here, only when an instance is needed ---
         logger.info("Importing ML libraries...")
         import torch
         from transformers import CLIPModel, CLIPProcessor
@@ -38,7 +34,6 @@ class ImageEmbedder:
         embedding_dim = self.model.config.projection_dim
         self.embedding_shape = (1, embedding_dim)
         self.embedding_dtype = np.float32
-        logger.info(f"Model '{model_id}' loaded with embedding dimension {embedding_dim}.")
 
     def embed_image(self, image: Image.Image) -> np.ndarray:
         import torch
@@ -46,7 +41,8 @@ class ImageEmbedder:
         with torch.no_grad():
             inputs = self.processor(images=image, return_tensors="pt").to(self.device)
             features = self.model.get_image_features(**inputs)
-            features /= features.norm(dim=-1, keepdim=True)
+            # Normalize in Torch (faster on CUDA)
+            features = features / features.norm(dim=-1, keepdim=True)
             return features.cpu().numpy().astype(self.embedding_dtype)
 
     def embed_text(self, text: str) -> np.ndarray:
@@ -55,10 +51,11 @@ class ImageEmbedder:
         with torch.no_grad():
             inputs = self.processor(text=text, return_tensors="pt").to(self.device)
             features = self.model.get_text_features(**inputs)
-            features /= features.norm(dim=-1, keepdim=True)
+            # Normalize in Torch
+            features = features / features.norm(dim=-1, keepdim=True)
             return features.cpu().numpy().astype(self.embedding_dtype)
 
-    def embed_batch(self, images: list[Image.Image], batch_size: int = 4) -> list[np.ndarray]:
+    def embed_batch(self, images: list[Image.Image], batch_size: int = 32) -> list[np.ndarray]:
         import torch
 
         with torch.no_grad():
@@ -67,6 +64,7 @@ class ImageEmbedder:
                 batch = images[i : i + batch_size]
                 inputs = self.processor(images=batch, return_tensors="pt", padding=True).to(self.device)
                 features = self.model.get_image_features(**inputs)
-                features /= features.norm(dim=-1, keepdim=True)
-                all_embeddings.extend([emb.cpu().numpy().astype(self.embedding_dtype) for emb in features])
+                # Normalize in Torch
+                features = features / features.norm(dim=-1, keepdim=True)
+                all_embeddings.extend(features.cpu().numpy().astype(self.embedding_dtype))
             return all_embeddings

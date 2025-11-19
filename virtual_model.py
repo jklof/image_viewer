@@ -23,10 +23,6 @@ class ImageResultModel(QAbstractListModel):
         self.placeholder_icon = create_placeholder_icon()
         self._filepath_to_row_map = {}
 
-        self._prefetch_radius = 5
-        self._last_prefetch_row = -1
-        self._prefetch_threshold = 2
-
         loader_manager.thumbnail_loaded.connect(self.on_thumbnail_ready)
 
     def rowCount(self, parent=QModelIndex()):
@@ -77,19 +73,6 @@ class ImageResultModel(QAbstractListModel):
         return mime_data
 
     # --- End Drag and Drop Support ---
-
-    def _prefetch_nearby(self, center_row: int):
-        if abs(center_row - self._last_prefetch_row) < self._prefetch_threshold:
-            return
-
-        self._last_prefetch_row = center_row
-        start_row = max(0, center_row - self._prefetch_radius)
-        end_row = min(len(self.results_data), center_row + self._prefetch_radius + 1)
-
-        for row in range(start_row, end_row):
-            if row < len(self.results_data):
-                _, filepath = self.results_data[row]
-                loader_manager.request_thumbnail(filepath)
 
     @Slot(str)
     def on_thumbnail_ready(self, filepath: str):

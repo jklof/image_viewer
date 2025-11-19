@@ -1,19 +1,18 @@
 import argparse
 import logging
+import multiprocessing
 from pathlib import Path
 import sys
-import yaml
 from tqdm import tqdm
 
 from image_db import ImageDatabase
 from ml_core import ImageEmbedder
 from config_utils import get_scan_directories, get_db_path, get_model_id
 
-# Setup basic logging for the CLI. Set to WARNING to keep the output clean,
-# but allow module-level loggers (like ml_core) to print INFO if needed.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# Setup basic logging for the CLI.
+# We use a format that fits well with CLI output.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
-# Specifically set the logger for this script to INFO for our status messages.
 
 
 def handle_sync(db: ImageDatabase, args: argparse.Namespace):
@@ -33,12 +32,16 @@ def handle_sync(db: ImageDatabase, args: argparse.Namespace):
         nonlocal pbar
         if stage == "hashing":
             if pbar is None:
-                pbar = tqdm(total=total, desc="Hashing files", unit=" file", ncols=100)
-            # Update the progress bar to the current value
-            pbar.update(current - pbar.n)
+                pbar = tqdm(total=total, desc="Processing files", unit=" img", ncols=100)
+
+            # TQDM update expects the delta, but our callback provides the absolute total.
+            # Calculate the delta:
+            delta = current - pbar.n
+            if delta > 0:
+                pbar.update(delta)
 
     def cli_status_callback(message: str):
-        # Use tqdm.write to print messages without breaking the progress bar
+        # Use tqdm.write to print messages without breaking the progress bar layout
         tqdm.write(f"-> {message}")
 
     try:
@@ -47,9 +50,14 @@ def handle_sync(db: ImageDatabase, args: argparse.Namespace):
             progress_callback=cli_progress_callback,
             status_callback=cli_status_callback,
         )
+        # Ensure pbar hits 100% visually if it exists
+        if pbar:
+            pbar.update(pbar.total - pbar.n)
         logger.info("Synchronization complete.")
+    except KeyboardInterrupt:
+        logger.warning("Synchronization interrupted by user.")
+        db.cancel_sync()
     finally:
-        # Ensure the progress bar is closed even if an error occurs
         if pbar:
             pbar.close()
 
@@ -62,7 +70,7 @@ def handle_search_image(db: ImageDatabase, args: argparse.Namespace):
         return
 
     logger.info(f"Searching for top {args.top_k} images similar to '{query_path.name}'...")
-    results = db.search_similar_images(args.image_path, args.top_k)
+    results = db.search_similar_images(str(query_path), args.top_k)
 
     print(f"\n--- Top {len(results)} images similar to '{query_path.name}' ---")
     for score, path in results:
@@ -81,6 +89,13 @@ def handle_search_text(db: ImageDatabase, args: argparse.Namespace):
 
 def main():
     """Main function to set up parser and handle command dispatch."""
+
+    # --- CRITICAL: Set start method to 'spawn' ---
+    # PyTorch + Multiprocessing on Linux defaults to 'fork', which is unsafe
+    # when CUDA or OpenMP libraries are initialized. We must force 'spawn'.
+    if multiprocessing.get_start_method(allow_none=True) != "spawn":
+        multiprocessing.set_start_method("spawn", force=True)
+
     parser = argparse.ArgumentParser(
         description="An AI-powered command-line image management tool.",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -119,20 +134,16 @@ def main():
 
     args = parser.parse_args()
 
-    embedder = None
-    db = None
-
     try:
         # Lazily instantiate the embedder only for commands that need it.
-        # This avoids loading the large ML model for commands like '--help'.
         if hasattr(args, "func"):
-            logger.info("Initializing...")
+            logger.info("Initializing ML models...")
 
-            # Load model ID from config, respecting the --config argument
+            # Load model ID from config
             model_id = get_model_id(args.config)
             embedder = ImageEmbedder(model_id=model_id, use_cpu_only=args.cpu_only)
 
-            # Prioritize command-line arg, fall back to config file
+            # Determine DB path
             db_path = args.db_path if args.db_path else get_db_path(args.config)
 
             logger.info(f"Opening database at '{db_path}'...")
@@ -147,13 +158,13 @@ def main():
         logger.error("--- DATABASE AND MODEL ARE INCOMPATIBLE ---")
         logger.error(str(e))
         sys.exit(1)
+    except KeyboardInterrupt:
+        # Handle Ctrl+C cleanly at the top level
+        print("\nOperation aborted by user.")
+        sys.exit(0)
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        # The ImageDatabase object no longer holds a persistent connection,
-        # so there is no need to call a .close() method.
-        pass
 
 
 if __name__ == "__main__":
