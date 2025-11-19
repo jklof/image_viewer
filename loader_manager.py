@@ -135,7 +135,7 @@ class LoaderManager(QObject):
             # This ensures we only process what is currently on screen (LIFO)
             while len(self.queue) >= MAX_PENDING_JOBS:
                 try:
-                    discarded = self.queue.pop() # Remove oldest
+                    discarded = self.queue.pop()  # Remove oldest
                     self.pending_jobs.discard(discarded)
                     # We removed an item but the semaphore count is still high.
                     # The worker will handle this empty slot gracefully.
@@ -185,7 +185,7 @@ class LoaderManager(QObject):
 
     def job_finished(self, filepath: str, image: QImage | None):
         """
-        Called by a worker when it completes a job. 
+        Called by a worker when it completes a job.
         NOTE: This method might be called from the worker thread context.
         We must be careful to handle QImage -> QPixmap conversion on the main thread.
         """
@@ -195,12 +195,13 @@ class LoaderManager(QObject):
         # We need to handle the QImage -> QPixmap conversion carefully.
         # If this method runs in the worker thread, we can't create QPixmap here.
         # Strategy: Use QMetaObject.invokeMethod to push the result to the main thread
-        
+
         if image:
             # Enqueue the conversion to run on the main thread
-            QMetaObject.invokeMethod(self, "_handle_finished_job", Qt.QueuedConnection, 
-                                     Q_ARG(str, filepath), Q_ARG(QImage, image))
-        
+            QMetaObject.invokeMethod(
+                self, "_handle_finished_job", Qt.QueuedConnection, Q_ARG(str, filepath), Q_ARG(QImage, image)
+            )
+
         with QMutexLocker(self.mutex):
             self.pending_jobs.discard(filepath)
             # NO NEED FOR WAKE SIGNAL: The worker loops back immediately,

@@ -40,18 +40,18 @@ def create_list_item(score: float, filepath: str) -> "QStandardItem":  # Forward
 def create_placeholder_icon() -> QIcon:
     """Creates a placeholder icon with text."""
     pixmap = QPixmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
-    pixmap.fill(QColor(40, 40, 40)) # Dark gray background
-    
+    pixmap.fill(QColor(40, 40, 40))  # Dark gray background
+
     painter = QPainter(pixmap)
-    painter.setPen(QColor(100, 100, 100)) # Lighter gray text
+    painter.setPen(QColor(100, 100, 100))  # Lighter gray text
     font = painter.font()
     font.setPointSize(10)
     painter.setFont(font)
-    
+
     # Draw "Loading..." in the center
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "Loading...")
     painter.end()
-    
+
     return QIcon(pixmap)
 
 
@@ -148,8 +148,8 @@ class SearchResultDelegate(QStyledItemDelegate):
         # Draw filename (elided)
         filepath = index.data(FILEPATH_ROLE)
 
-        filename = os.path.basename(filepath) 
-        
+        filename = os.path.basename(filepath)
+
         # Set the pen color using the palette for theme compatibility
         self.text_pen.setColor(option.palette.text().color())
         painter.setFont(self.filename_font)

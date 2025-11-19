@@ -91,11 +91,11 @@ class BackendWorker:
                 return
             logger.info(f"Performing composite search with {len(query_elements)} elements.")
             self.signals.status_update.emit(f"Building query from {len(query_elements)} elements...")
-            
+
             combined_vector = np.zeros(self.embedder.embedding_shape, dtype=self.embedder.embedding_dtype)
             successful_elements = 0
             failed_elements = []
-            
+
             for element in query_elements:
                 embedding = None
                 if element["type"] == "text":
@@ -117,19 +117,21 @@ class BackendWorker:
                         )
                         failed_elements.append(("image", element["value"], str(e)))
                         continue
-                
+
                 if embedding is not None:
                     combined_vector += embedding * element["weight"]
                     successful_elements += 1
 
             # Check if any elements were successfully processed
             if failed_elements:
-                failed_summary = ", ".join([f"{t} ({Path(v).name if t == 'image' else v})" for t, v, _ in failed_elements])
+                failed_summary = ", ".join(
+                    [f"{t} ({Path(v).name if t == 'image' else v})" for t, v, _ in failed_elements]
+                )
                 logger.warning(f"Failed to process {len(failed_elements)} query element(s): {failed_summary}")
                 self.signals.status_update.emit(
                     f"Warning: {len(failed_elements)} of {len(query_elements)} query elements failed to load"
                 )
-            
+
             norm = np.linalg.norm(combined_vector)
             if norm > 0:
                 logger.info(f"Successfully processed {successful_elements}/{len(query_elements)} query elements.")
@@ -139,7 +141,9 @@ class BackendWorker:
             else:
                 # All elements failed or resulted in zero vector
                 if successful_elements == 0 and len(query_elements) > 0:
-                    error_msg = f"All {len(query_elements)} query element(s) failed to load or process. Cannot perform search."
+                    error_msg = (
+                        f"All {len(query_elements)} query element(s) failed to load or process. Cannot perform search."
+                    )
                     logger.error(error_msg)
                     self.signals.error.emit(error_msg)
                     # Still show random results so the UI isn't empty

@@ -116,6 +116,8 @@ class EmbeddingConsumerThread(threading.Thread):
         filepaths, shas, mtimes = zip(*batch)
         shas_to_check = list(set(shas))
         existing_shas_in_db = set()
+
+        # Check which SHAs already exist
         for i in range(0, len(shas_to_check), SQLITE_VARIABLE_LIMIT):
             chunk = shas_to_check[i : i + SQLITE_VARIABLE_LIMIT]
             placeholders = ", ".join("?" for _ in chunk)
@@ -126,38 +128,63 @@ class EmbeddingConsumerThread(threading.Thread):
         sha_to_filepath_map = defaultdict(list)
         for fp, sha in zip(filepaths, shas):
             sha_to_filepath_map[sha].append(fp)
+
         for sha in shas_to_check:
             if sha not in existing_shas_in_db:
+                # We pick one filepath to represent this SHA for loading purposes
                 new_image_data.append((sha, sorted(sha_to_filepath_map[sha])[0]))
 
         new_embeddings_to_commit = []
+        # Track SHAs that we successfully generate embeddings for in this run
+        valid_new_shas = set()
+
         if new_image_data:
             logger.info(f"Found {len(new_image_data)} new images in batch to embed.")
             shas_to_embed, image_paths_to_load = zip(*new_image_data)
-            pil_images, valid_shas = [], []
+            pil_images, temp_valid_shas = [], []
+
             for sha, path in zip(shas_to_embed, image_paths_to_load):
                 try:
                     pil_images.append(Image.open(path).convert("RGB"))
-                    valid_shas.append(sha)
+                    temp_valid_shas.append(sha)
                 except Exception as e:
                     logger.warning(f"Could not load image {path}. Skipping. Error: {e}")
+                    # Note: We do NOT add this SHA to temp_valid_shas
 
             if pil_images:
                 try:
                     embeddings = self.embedder.embed_batch(pil_images)
-                    new_embeddings_to_commit = [(sha, emb.tobytes()) for sha, emb in zip(valid_shas, embeddings)]
+                    new_embeddings_to_commit = [(sha, emb.tobytes()) for sha, emb in zip(temp_valid_shas, embeddings)]
+                    valid_new_shas.update(temp_valid_shas)
                 except Exception as e:
                     logger.error(f"Failed to embed batch. Error: {e}", exc_info=True)
+                    # If the whole batch fails embedding, valid_new_shas remains empty
 
         with self.conn:
             if new_embeddings_to_commit:
                 self.conn.executemany(
                     "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)", new_embeddings_to_commit
                 )
-            filepath_data = [(str(fp), sha, mt) for fp, sha, mt in zip(filepaths, shas, mtimes)]
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO filepaths (filepath, sha256, mtime) VALUES (?, ?, ?)", filepath_data
-            )
+
+            # Calculate the set of SHAs that are legally present in the embeddings table now.
+            # 1. SHAs that were there before (existing_shas_in_db)
+            # 2. SHAs we just added successfully (valid_new_shas)
+            safe_shas = existing_shas_in_db.union(valid_new_shas)
+
+            filepath_data = []
+            for fp, sha, mt in zip(filepaths, shas, mtimes):
+                if sha in safe_shas:
+                    filepath_data.append((str(fp), sha, mt))
+                else:
+                    # This happens if the image was 'new' but failed to load/embed.
+                    # We skip inserting it into filepaths to prevent FK violation.
+                    pass
+
+            if filepath_data:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO filepaths (filepath, sha256, mtime) VALUES (?, ?, ?)", filepath_data
+                )
+
         logger.debug(f"Batch of {len(batch)} items fully processed and committed.")
 
 

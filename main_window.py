@@ -265,7 +265,7 @@ class MainWindow(QMainWindow):
         self.loading_message_label.setText("Initializing, please wait...")
         self.loading_spinner.start_animation(QColor(85, 170, 255))
         self.set_controls_enabled(False)
-        self.set_sync_controls_enabled(False) 
+        self.set_sync_controls_enabled(False)
 
     def _connect_ui_signals(self):
         self.query_builder.search_triggered.connect(self.composite_search_triggered.emit)
