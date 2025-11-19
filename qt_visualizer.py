@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PySide6.QtGui import QPixmap, QCursor
-from PySide6.QtCore import Qt, Signal, Slot, QPoint
+from PySide6.QtCore import Qt, Signal, Slot, QPoint, QTimer
 
 # Ensure PySide6 compatibility
 pg.setConfigOption("leftButtonPan", False)  # Use right-click for pan, left for selecting/hover
@@ -101,6 +101,14 @@ class QtVisualizer(QWidget):
         self.tooltip = QtImageTooltip(self)
         self._is_active = False
 
+        # ---  Debounce Timer ---
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.setInterval(100)  # 100ms delay
+        self.hover_timer.timeout.connect(self._show_tooltip_from_timer)
+
+        self._pending_hover_data = None  # Store data temporarily
+
     def showEvent(self, event):
         super().showEvent(event)
         self._is_active = True
@@ -108,6 +116,7 @@ class QtVisualizer(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._is_active = False
+        self.hover_timer.stop()  # Stop any pending timer
         self.tooltip.hide_tooltip()
 
     @Slot(object, object)
@@ -115,13 +124,31 @@ class QtVisualizer(QWidget):
         if not self._is_active:
             return
 
+        # Stop any pending timer immediately when mouse moves
+        self.hover_timer.stop()
+
         if len(points) == 0:
             self.tooltip.hide_tooltip()
             self.status_update.emit("Ready")
             return
 
-        point = points[0]
+        # Store data and start timer instead of showing immediately
+        self._pending_hover_data = points[0]
+        self.hover_timer.start()
+
+    @Slot()
+    def _show_tooltip_from_timer(self):
+        """Called only if the mouse stays on a point for > 100ms."""
+        if not self._pending_hover_data:
+            return
+
+        point = self._pending_hover_data
         data_index = int(point.data())
+
+        # Safety check
+        if data_index >= len(self.all_data):
+            return
+
         _, _, cluster, filepath = self.all_data[data_index]
         global_mouse_pos = QCursor.pos()
         self.tooltip.show_image(filepath, global_mouse_pos)
@@ -148,6 +175,7 @@ class QtVisualizer(QWidget):
     @Slot(list)
     def load_plot_data(self, plot_data: list):
         self.tooltip.hide_tooltip()
+        self.hover_timer.stop()  # Stop any pending timer
         self.all_data = plot_data
 
         if not plot_data:
