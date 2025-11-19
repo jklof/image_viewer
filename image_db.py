@@ -32,8 +32,9 @@ def _targeted_hashing_worker(filepath: Path, mtime: float) -> tuple[Path, str, f
     """
     try:
         sha256_hash = hashlib.sha256()
+        buffer_size = 1024 * 1024  # 1MB buffer
         with open(filepath, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
+            for byte_block in iter(lambda: f.read(buffer_size), b""):
                 sha256_hash.update(byte_block)
         return filepath, sha256_hash.hexdigest(), mtime
     except (IOError, FileNotFoundError, OSError) as e:

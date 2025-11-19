@@ -91,11 +91,22 @@ class BackendWorker:
                 return
             logger.info(f"Performing composite search with {len(query_elements)} elements.")
             self.signals.status_update.emit(f"Building query from {len(query_elements)} elements...")
+            
             combined_vector = np.zeros(self.embedder.embedding_shape, dtype=self.embedder.embedding_dtype)
+            successful_elements = 0
+            failed_elements = []
+            
             for element in query_elements:
                 embedding = None
                 if element["type"] == "text":
-                    embedding = self.embedder.embed_text(element["value"])
+                    try:
+                        embedding = self.embedder.embed_text(element["value"])
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not embed text '{element['value'][:50]}...' for composite query. Error: {e}"
+                        )
+                        failed_elements.append(("text", element["value"][:50], str(e)))
+                        continue
                 elif element["type"] == "image":
                     try:
                         image = Image.open(element["value"]).convert("RGB")
@@ -104,18 +115,39 @@ class BackendWorker:
                         logger.warning(
                             f"Could not load image {element['value']} for composite query. Skipping. Error: {e}"
                         )
+                        failed_elements.append(("image", element["value"], str(e)))
                         continue
+                
                 if embedding is not None:
                     combined_vector += embedding * element["weight"]
+                    successful_elements += 1
 
+            # Check if any elements were successfully processed
+            if failed_elements:
+                failed_summary = ", ".join([f"{t} ({Path(v).name if t == 'image' else v})" for t, v, _ in failed_elements])
+                logger.warning(f"Failed to process {len(failed_elements)} query element(s): {failed_summary}")
+                self.signals.status_update.emit(
+                    f"Warning: {len(failed_elements)} of {len(query_elements)} query elements failed to load"
+                )
+            
             norm = np.linalg.norm(combined_vector)
             if norm > 0:
+                logger.info(f"Successfully processed {successful_elements}/{len(query_elements)} query elements.")
                 final_query_vector = combined_vector / norm
                 results = self.db._perform_search(final_query_vector, -1)
                 self.signals.results_ready.emit(results)
             else:
-                logger.warning("Composite query resulted in a zero vector. Falling back to random order.")
-                self.handle_random_search(None)
+                # All elements failed or resulted in zero vector
+                if successful_elements == 0 and len(query_elements) > 0:
+                    error_msg = f"All {len(query_elements)} query element(s) failed to load or process. Cannot perform search."
+                    logger.error(error_msg)
+                    self.signals.error.emit(error_msg)
+                    # Still show random results so the UI isn't empty
+                    self.handle_random_search(None)
+                else:
+                    logger.warning("Composite query resulted in a zero vector. Falling back to random order.")
+                    self.signals.status_update.emit("Query resulted in zero vector - showing random order")
+                    self.handle_random_search(None)
         except Exception:
             error_msg = traceback.format_exc()
             logger.error(f"--- AN ERROR OCCURRED DURING COMPOSITE SEARCH ---\n{error_msg}")

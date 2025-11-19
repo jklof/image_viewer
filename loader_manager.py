@@ -9,6 +9,8 @@ from PySide6.QtCore import (
     QMutex,
     QMutexLocker,
     QSemaphore,  # NEW IMPORT
+    QMetaObject,
+    Q_ARG,
 )
 from PySide6.QtGui import QPixmap, QImage
 from ui_components import THUMBNAIL_SIZE
@@ -70,8 +72,8 @@ class PersistentWorker(QRunnable):
                     self.manager.job_finished(filepath, None)  # Still mark as finished
                     continue
 
+                # Load as QImage (Thread Safe)
                 image = QImage(filepath)
-                pixmap = None
                 if not image.isNull():
                     scaled = image.scaled(
                         THUMBNAIL_SIZE,
@@ -79,11 +81,11 @@ class PersistentWorker(QRunnable):
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
-                    pixmap = QPixmap.fromImage(scaled)
+                    # Do NOT convert to QPixmap here - pass QImage to manager
+                    self.manager.job_finished(filepath, scaled)
                 else:
                     logger.warning(f"Failed to load image: {filepath}")
-
-                self.manager.job_finished(filepath, pixmap)
+                    self.manager.job_finished(filepath, None)
 
 
 class LoaderManager(QObject):
@@ -159,19 +161,38 @@ class LoaderManager(QObject):
             # Take from the FRONT of the queue (LIFO).
             return self.queue.popleft()
 
-    def job_finished(self, filepath: str, pixmap: QPixmap | None):
-        """Called by a worker when it completes a job."""
+    def job_finished(self, filepath: str, image: QImage | None):
+        """
+        Called by a worker when it completes a job. 
+        NOTE: This method might be called from the worker thread context.
+        We must be careful to handle QImage -> QPixmap conversion on the main thread.
+        """
         if self._is_shutting_down:
             return
 
-        if pixmap:
-            thumbnail_cache.put(filepath, pixmap)
-            self.thumbnail_loaded.emit(filepath)
-
+        # We need to handle the QImage -> QPixmap conversion carefully.
+        # If this method runs in the worker thread, we can't create QPixmap here.
+        # Strategy: Use QMetaObject.invokeMethod to push the result to the main thread
+        
+        if image:
+            # Enqueue the conversion to run on the main thread
+            QMetaObject.invokeMethod(self, "_handle_finished_job", Qt.QueuedConnection, 
+                                     Q_ARG(str, filepath), Q_ARG(QImage, image))
+        
         with QMutexLocker(self.mutex):
             self.pending_jobs.discard(filepath)
             # NO NEED FOR WAKE SIGNAL: The worker loops back immediately,
             # and if another job is available, it will acquire the semaphore.
+
+    @Slot(str, QImage)
+    def _handle_finished_job(self, filepath: str, image: QImage):
+        """
+        This slot runs on the main thread and safely converts QImage to QPixmap.
+        """
+        # This runs on the main thread - safe to create QPixmap here
+        pixmap = QPixmap.fromImage(image)
+        thumbnail_cache.put(filepath, pixmap)
+        self.thumbnail_loaded.emit(filepath)
 
     def shutdown(self):
         """Gracefully shuts down the loader."""

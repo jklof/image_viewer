@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QLabel, QFrame
 from PySide6.QtGui import QPixmap, QIcon, QPainter, QFont, QColor, QPalette, QPen, QFontMetrics
@@ -134,12 +135,14 @@ class SearchResultDelegate(QStyledItemDelegate):
 
         # Draw filename (elided)
         filepath = index.data(FILEPATH_ROLE)
+
+        filename = os.path.basename(filepath) 
+        
         # Set the pen color using the palette for theme compatibility
         self.text_pen.setColor(option.palette.text().color())
         painter.setFont(self.filename_font)
         painter.setPen(self.text_pen)
 
-        filename = Path(filepath).name
         # The filename rect now starts after the score and is centered
         filename_rect_width = item_rect.width() - 2 * self._padding
         filename_rect_x = item_rect.x() + self._padding
