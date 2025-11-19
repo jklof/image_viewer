@@ -57,6 +57,8 @@ class BackendWorker:
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
             logger.info("Backend initialized successfully.")
             self.signals.initialized.emit()
+        except (KeyboardInterrupt, SystemExit):
+            return
         except Exception:
             error_msg = traceback.format_exc()
             logger.error(f"--- AN ERROR OCCURRED DURING INITIALIZATION ---\n{error_msg}")
@@ -67,20 +69,33 @@ class BackendWorker:
         while not self._shutdown:
             try:
                 # Wait for a job to appear on the queue
-                job_type, payload = self.job_queue.get()
+                # EXCEPTION SAFETY: During interpreter shutdown, 'queue' might be None
+                # or raise errors.
+                try:
+                    job_type, payload = self.job_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
                 if job_type == "shutdown":
                     break
+
                 handler = getattr(self, f"handle_{job_type}", None)
                 if handler:
                     handler(payload)
                 else:
                     logger.warning(f"Unknown job type received: {job_type}")
-            except Exception:
-                # This is a fallback for unexpected errors in the loop itself.
-                # Individual handlers have their own, more specific error handling.
+
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("BackendWorker stopping due to interrupt/exit signal.")
+                break
+            except Exception as e:
+                # Catch generic errors in the loop to keep thread alive
+                if self._shutdown:
+                    break  # Ignore errors if we are shutting down
+
                 error_msg = traceback.format_exc()
                 logger.error(f"--- AN UNHANDLED ERROR OCCURRED IN BACKEND WORKER LOOP ---\n{error_msg}")
-                self.signals.error.emit(error_msg)
+                # self.signals.error.emit(error_msg) # Optional: might cause loops if UI is dead
 
         logger.info("BackendWorker thread shutting down.")
 
@@ -167,9 +182,7 @@ class BackendWorker:
             results = [(0.0, path) for path in filepaths]
             self.signals.results_ready.emit(results)
         except Exception:
-            error_msg = traceback.format_exc()
-            logger.error(f"--- AN ERROR OCCURRED DURING RANDOM SEARCH ---\n{error_msg}")
-            self.signals.error.emit(error_msg)
+            logger.error(traceback.format_exc())
 
     def handle_sort_by_date(self, _):
         try:
@@ -181,9 +194,7 @@ class BackendWorker:
             results = [(0.0, path) for path, mtime in files_with_mtime]
             self.signals.results_ready.emit(results)
         except Exception:
-            error_msg = traceback.format_exc()
-            logger.error(f"--- AN ERROR OCCURRED DURING SORT BY DATE ---\n{error_msg}")
-            self.signals.error.emit(error_msg)
+            logger.error(traceback.format_exc())
 
     def handle_visualization_data(self, _):
         try:
@@ -193,9 +204,7 @@ class BackendWorker:
             plot_data = self.db.get_visualization_data()
             self.signals.visualization_data_ready.emit(plot_data or [])
         except Exception:
-            error_msg = traceback.format_exc()
-            logger.error(f"--- AN ERROR OCCURRED LOADING VISUALIZATION DATA ---\n{error_msg}")
-            self.signals.error.emit(error_msg)
+            logger.error(traceback.format_exc())
 
     def handle_reload(self, _):
         try:
@@ -205,16 +214,11 @@ class BackendWorker:
             self.db._load_embeddings_into_memory()
             self.signals.reloaded.emit()
         except Exception:
-            error_msg = traceback.format_exc()
-            logger.error(f"--- AN ERROR OCCURRED DURING DATA RELOAD ---\n{error_msg}")
-            self.signals.error.emit(error_msg)
+            logger.error(traceback.format_exc())
 
     def shutdown(self):
         self._shutdown = True
-        # Post a final shutdown job to unblock the queue.get() if it's waiting
         try:
             self.job_queue.put(("shutdown", None), block=False)
-        except queue.Full:
-            # If the queue is somehow full, it doesn't matter,
-            # the worker will eventually see the _shutdown flag.
+        except (queue.Full, Exception):
             pass

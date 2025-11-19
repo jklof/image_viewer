@@ -64,45 +64,54 @@ class EmbeddingConsumerThread(threading.Thread):
     def run(self):
         """The main loop for the consumer thread."""
         logger.info("EmbeddingConsumerThread started.")
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA foreign_keys = ON;")
 
-        batch = []
+        # Wrap everything in try-except for thread safety
         try:
+            self.conn = sqlite3.connect(self.db_path)
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA foreign_keys = ON;")
+
+            batch = []
             while not self.cancel_flag.is_set():
                 try:
                     item = self.work_queue.get(timeout=0.5)
                     if item is None:  # Graceful shutdown signal
                         if batch:
-                            logger.info(f"Processing final batch of {len(batch)} items before shutdown.")
                             self._process_batch(batch)
-                        break  # Exit the loop
+                        break
 
                     batch.append(item)
                     if len(batch) >= EMBEDDING_BATCH_SIZE:
                         self._process_batch(batch)
                         batch = []
                 except queue.Empty:
-                    # Timeout is not an error. If we have a partial batch, process it.
                     if batch:
                         self._process_batch(batch)
                         batch = []
+                except Exception:
+                    # If queue operations fail (e.g. during shutdown)
+                    if self.cancel_flag.is_set():
+                        break
+                    raise
 
         except Exception as e:
             logger.error(f"Unhandled exception in EmbeddingConsumerThread: {e}", exc_info=True)
         finally:
-            # This block runs on BOTH graceful shutdown and cancellation.
+            # EXCEPTION SAFETY:
+            # 1. Drain queue safely
             if self.cancel_flag.is_set():
-                logger.info("Cancellation detected. Draining work queue to unblock producer...")
-                while not self.work_queue.empty():
-                    try:
+                try:
+                    while not self.work_queue.empty():
                         self.work_queue.get_nowait()
-                    except queue.Empty:
-                        break  # Safeguard against race condition
+                except Exception:
+                    pass
 
+            # 2. Close connection ONLY if it was created
             if self.conn:
-                self.conn.close()
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
                 logger.info("Database connection closed by EmbeddingConsumerThread.")
             logger.info("EmbeddingConsumerThread finished.")
 

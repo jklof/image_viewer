@@ -8,7 +8,7 @@ from PySide6.QtCore import (
     Slot,
     QMutex,
     QMutexLocker,
-    QSemaphore,  # NEW IMPORT
+    QSemaphore,
     QMetaObject,
     Q_ARG,
 )
@@ -16,6 +16,7 @@ from PySide6.QtGui import QPixmap, QImage
 from ui_components import THUMBNAIL_SIZE
 
 import logging
+import traceback  # Import traceback for safe logging
 
 logger = logging.getLogger(__name__)
 
@@ -63,30 +64,50 @@ class PersistentWorker(QRunnable):
         self.setAutoDelete(False)
 
     def run(self):
-        # We check for the shutdown flag after a small timeout in get_next_job
-        # or when we are finally woken up during the shutdown sequence.
-        while not self.manager._is_shutting_down:
-            filepath = self.manager.get_next_job()
-            if filepath:
-                # --- Actual Work Logic ---
-                if thumbnail_cache.get(filepath):
-                    self.manager.job_finished(filepath, None)  # Still mark as finished
-                    continue
+        """
+        EXCEPTION SAFETY:
+        This entire method is wrapped to prevent exceptions from propagating
+        back to the QThreadPool during application shutdown.
+        """
+        try:
+            while not self.manager._is_shutting_down:
+                try:
+                    filepath = self.manager.get_next_job()
+                    if filepath:
+                        # --- Actual Work Logic ---
+                        # Check cache first
+                        if thumbnail_cache.get(filepath):
+                            self.manager.job_finished(filepath, None)
+                            continue
 
-                # Load as QImage (Thread Safe)
-                image = QImage(filepath)
-                if not image.isNull():
-                    scaled = image.scaled(
-                        THUMBNAIL_SIZE,
-                        THUMBNAIL_SIZE,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    # Do NOT convert to QPixmap here - pass QImage to manager
-                    self.manager.job_finished(filepath, scaled)
-                else:
-                    logger.warning(f"Failed to load image: {filepath}")
-                    self.manager.job_finished(filepath, None)
+                        # Load as QImage (Thread Safe)
+                        image = QImage(filepath)
+                        if not image.isNull():
+                            scaled = image.scaled(
+                                THUMBNAIL_SIZE,
+                                THUMBNAIL_SIZE,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
+                            self.manager.job_finished(filepath, scaled)
+                        else:
+                            # Even if loading fails, we mark job as finished
+                            self.manager.job_finished(filepath, None)
+                except Exception:
+                    # Catch individual job failures so the worker keeps running
+                    # unless it's a shutdown issue.
+                    if self.manager._is_shutting_down:
+                        break
+                    logger.debug(f"Worker encountered error processing job:\n{traceback.format_exc()}")
+
+        except (KeyboardInterrupt, SystemExit):
+            # Allow standard python exit signals to pass cleanly
+            pass
+        except Exception:
+            # Catch catastrophic failures (e.g. QImage bindings destroyed)
+            # Log only if not shutting down, otherwise suppress to avoid noise
+            if not self.manager._is_shutting_down:
+                logger.error(f"PersistentWorker thread crashed:\n{traceback.format_exc()}")
 
 
 class LoaderManager(QObject):
@@ -209,24 +230,38 @@ class LoaderManager(QObject):
 
     @Slot(str, QImage)
     def _handle_finished_job(self, filepath: str, image: QImage):
-        """
-        This slot runs on the main thread and safely converts QImage to QPixmap.
-        """
-        # This runs on the main thread - safe to create QPixmap here
-        pixmap = QPixmap.fromImage(image)
-        thumbnail_cache.put(filepath, pixmap)
-        self.thumbnail_loaded.emit(filepath)
+        if self._is_shutting_down:
+            return
+        try:
+            pixmap = QPixmap.fromImage(image)
+            thumbnail_cache.put(filepath, pixmap)
+            self.thumbnail_loaded.emit(filepath)
+        except Exception:
+            # If QPixmap creation fails (e.g. during shutdown), ignore
+            pass
 
     def shutdown(self):
         """Gracefully shuts down the loader."""
         logger.info("LoaderManager shutting down...")
+
+        # 1. Set Flag
         with QMutexLocker(self.mutex):
             self._is_shutting_down = True
             self.queue.clear()
-            # Release the semaphore multiple times to ensure all NUM_WORKERS
-            # threads (and any blocked on acquiring) wake up and see the flag.
-            self.semaphore.release(NUM_WORKERS)
-        self.thread_pool.waitForDone(5000)
+            self.pending_jobs.clear()
+
+        # 2. Wake up all workers so they see the flag
+        # We release enough semaphores for all workers + buffer
+        self.semaphore.release(NUM_WORKERS * 2)
+
+        # 3. Wait for threads
+        logger.info("Waiting for thread pool to clear...")
+        # Don't wait forever; if a thread is stuck on a bad C-call, we proceed to exit
+        is_cleared = self.thread_pool.waitForDone(2000)
+
+        if not is_cleared:
+            logger.warning("Thread pool did not clear instantly (likely harmless during exit).")
+
         logger.info("LoaderManager shut down complete.")
 
 
