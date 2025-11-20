@@ -147,6 +147,11 @@ class AppController(QObject):
     def on_sync_requested(self):
         if self.sync_thread and self.sync_thread.isRunning():
             return
+
+        # Explicitly disable visualization during sync to prevent DB locking
+        # and wasted computation.
+        self.window.visualize_btn.setEnabled(False)
+
         self.window.set_sync_controls_enabled(False)
         self.window.show_sync_active_view()
         self.window.update_status_bar("Sync started. You can continue searching on existing data.")
@@ -181,6 +186,8 @@ class AppController(QObject):
         # 1. Tell the thread to quit. This is a non-blocking request.
         if self.sync_thread:
             self.sync_thread.quit()
+        # 2. ALWAYS reload, because DB state might have partially changed
+        # even on cancel/error.
         self.window.update_sync_status("Reloading data...")
         self.backend_job_queue.put(("reload", None))
 
@@ -201,6 +208,10 @@ class AppController(QObject):
         self.window.show_sync_idle_view()
         self.window.set_sync_controls_enabled(True)
         self.window.update_status_bar("Data reloaded. Displaying updated images.")
+
+        # Now that sync is done and data is loaded, it is safe to visualize.
+        self.window.visualize_btn.setEnabled(True)
+
         self.on_random_order_requested()
 
     @Slot()
