@@ -69,8 +69,6 @@ class BackendWorker:
         while not self._shutdown:
             try:
                 # Wait for a job to appear on the queue
-                # EXCEPTION SAFETY: During interpreter shutdown, 'queue' might be None
-                # or raise errors.
                 try:
                     job_type, payload = self.job_queue.get(timeout=1.0)
                 except queue.Empty:
@@ -200,10 +198,24 @@ class BackendWorker:
         try:
             if not self.db:
                 return
-            self.signals.status_update.emit("Loading pre-calculated visualization data...")
+
+            # Check if shutdown requested during long op
+            def check_stop():
+                if self._shutdown:
+                    raise Exception("Backend shutdown requested")
+
+            self.signals.status_update.emit("Checking visualization data integrity...")
+
+            # Ensure data exists (re-calculate UMAP if dirty)
+            self.db.ensure_visualization_data(
+                status_callback=lambda msg: self.signals.status_update.emit(msg), check_cancelled_callback=check_stop
+            )
+
+            self.signals.status_update.emit("Loading visualization data...")
             plot_data = self.db.get_visualization_data()
             self.signals.visualization_data_ready.emit(plot_data or [])
         except Exception:
+            # Log but don't crash thread; the UI will just stay in loading state or user can try again
             logger.error(traceback.format_exc())
 
     def handle_reload(self, _):

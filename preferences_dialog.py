@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 
 KNOWN_MODELS = [
     "laion/CLIP-ViT-L-14-laion2B-s32B-b82K",  # Default, good balance
-    "openai/clip-vit-base-patch32",          # Faster, less accurate
-    "openai/clip-vit-large-patch14",         # Standard OpenAI Large
-    "laion/CLIP-ViT-H-14-laion2B-s32B-b79K", # Very heavy, high accuracy
+    "openai/clip-vit-base-patch32",  # Faster, less accurate
+    "openai/clip-vit-large-patch14",  # Standard OpenAI Large
+    "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",  # Very heavy, high accuracy
 ]
+
 
 class PreferencesDialog(QDialog):
     def __init__(self, parent=None):
@@ -32,7 +33,7 @@ class PreferencesDialog(QDialog):
         self.setWindowTitle("Preferences")
         self.setMinimumWidth(500)
         self.setMinimumHeight(600)
-        
+
         self.current_config = load_config()
         self._init_ui()
         self._load_values()
@@ -43,7 +44,7 @@ class PreferencesDialog(QDialog):
         # --- Scan Directories Section ---
         dir_group = QGroupBox("Image Scan Directories")
         dir_layout = QVBoxLayout(dir_group)
-        
+
         self.dir_list = QListWidget()
         self.dir_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         dir_layout.addWidget(self.dir_list)
@@ -56,22 +57,22 @@ class PreferencesDialog(QDialog):
         btn_layout.addWidget(self.add_dir_btn)
         btn_layout.addWidget(self.remove_dir_btn)
         dir_layout.addLayout(btn_layout)
-        
+
         layout.addWidget(dir_group)
 
         # --- Database Section ---
         db_group = QGroupBox("Database Storage")
         db_layout = QVBoxLayout(db_group)
-        
+
         db_input_layout = QHBoxLayout()
         self.db_path_input = QLineEdit()
         self.db_path_input.setPlaceholderText("path/to/images.db")
         self.browse_db_btn = QPushButton("Browse...")
         self.browse_db_btn.clicked.connect(self._browse_db_path)
-        
+
         db_input_layout.addWidget(self.db_path_input)
         db_input_layout.addWidget(self.browse_db_btn)
-        
+
         db_layout.addLayout(db_input_layout)
         db_layout.addWidget(QLabel("Note: Changing this requires an application restart."))
         layout.addWidget(db_group)
@@ -79,11 +80,11 @@ class PreferencesDialog(QDialog):
         # --- Model Section ---
         model_group = QGroupBox("AI Model (CLIP)")
         model_layout = QVBoxLayout(model_group)
-        
+
         self.model_combo = QComboBox()
-        self.model_combo.setEditable(True) # Allow custom HuggingFace strings
+        self.model_combo.setEditable(True)  # Allow custom HuggingFace strings
         self.model_combo.addItems(KNOWN_MODELS)
-        
+
         model_layout.addWidget(self.model_combo)
         model_layout.addWidget(QLabel("Note: Changing model requires a full re-sync and restart."))
         layout.addWidget(model_group)
@@ -119,7 +120,9 @@ class PreferencesDialog(QDialog):
             self.dir_list.takeItem(self.dir_list.row(item))
 
     def _browse_db_path(self):
-        filepath, _ = QFileDialog.getSaveFileName(self, "Select Database File", self.db_path_input.text(), "SQLite DB (*.db);;All Files (*)")
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Select Database File", self.db_path_input.text(), "SQLite DB (*.db);;All Files (*)"
+        )
         if filepath:
             self.db_path_input.setText(filepath)
 
@@ -148,8 +151,12 @@ class PreferencesDialog(QDialog):
         self.current_config["model_id"] = new_model
 
         save_config(self.current_config)
-        
+
         if restart_needed:
-            QMessageBox.information(self, "Restart Required", "You have changed settings (Database or Model) that require an application restart to take effect.")
-        
+            QMessageBox.information(
+                self,
+                "Restart Required",
+                "You have changed settings (Database or Model) that require an application restart to take effect.",
+            )
+
         self.accept()

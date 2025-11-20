@@ -381,9 +381,8 @@ class ImageDatabase:
 
     def _finalize_sync(self, status_callback, check_cancelled):
         self._cleanup_orphaned_embeddings()
-        if status_callback:
-            status_callback("Updating visualization...")
-        self._update_visualization_data(status_callback, check_cancelled)
+        # We no longer automatically update visualization here.
+        # It will be calculated Just-In-Time when the user requests it.
         self._load_embeddings_into_memory()
 
     def _load_embeddings_into_memory(self):
@@ -402,17 +401,24 @@ class ImageDatabase:
             conn.execute(
                 "DELETE FROM embeddings WHERE NOT EXISTS (SELECT 1 FROM filepaths WHERE filepaths.sha256 = embeddings.sha256)"
             )
+            # Also remove visualization entries that no longer have a corresponding embedding
             conn.execute("DELETE FROM visualization WHERE sha256 NOT IN (SELECT sha256 FROM embeddings)")
         # ------------------------------------------------------------------
 
     def _reconstruct_embedding(self, blob):
         return np.frombuffer(blob, dtype=self.embedder.embedding_dtype).reshape(self.embedder.embedding_shape)
 
-    def _update_visualization_data(self, status_callback=None, check_cancelled_callback=None):
+    def ensure_visualization_data(self, status_callback=None, check_cancelled_callback=None):
+        """
+        Checks if the visualization data is up-to-date with the embeddings.
+        If not, calculates UMAP reduction and HDBSCAN clustering and saves to DB.
+        """
         try:
             with self._get_db_connection() as conn:
                 emb_shas = {r[0] for r in conn.execute("SELECT sha256 FROM embeddings").fetchall()}
                 vis_shas = {r[0] for r in conn.execute("SELECT sha256 FROM visualization").fetchall()}
+
+            # If sets match, we are good.
             if emb_shas == vis_shas:
                 return
 
@@ -424,19 +430,32 @@ class ImageDatabase:
             all_shas = [item["sha256"] for item in embedding_data]
 
             if status_callback:
-                status_callback("Calculating visualization (UMAP/HDBSCAN)...")
+                status_callback("Calculating visualization (UMAP)... This may take time.")
+
+            # Lazy import to save startup time if not used
             import umap
             import hdbscan
 
             if check_cancelled_callback:
                 check_cancelled_callback()
+
+            # UMAP Calculation
             coords_2d = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, n_jobs=-1).fit_transform(all_embeddings)
 
             if check_cancelled_callback:
                 check_cancelled_callback()
+
+            if status_callback:
+                status_callback("Clustering (HDBSCAN)...")
+
+            # HDBSCAN Clustering
             cluster_labels = hdbscan.HDBSCAN(min_cluster_size=5, core_dist_n_jobs=-1).fit_predict(coords_2d)
 
             vis_data = [(sh, float(c[0]), float(c[1]), int(l)) for sh, c, l in zip(all_shas, coords_2d, cluster_labels)]
+
+            if status_callback:
+                status_callback("Saving visualization data...")
+
             with self._get_db_connection() as conn:
                 conn.execute("DELETE FROM visualization")
                 conn.executemany(
@@ -444,6 +463,7 @@ class ImageDatabase:
                 )
         except Exception as e:
             logger.error(f"Visualization update failed: {e}")
+            # We don't raise here, to avoid crashing the worker thread, but logs will show it.
 
     def _build_sha_to_path_map(self):
         self._sha_to_path_map_cache = defaultdict(list)
