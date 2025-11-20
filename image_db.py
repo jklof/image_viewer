@@ -424,11 +424,20 @@ class ImageDatabase:
             if emb_count > 0 and emb_count == vis_count:
                 return
 
+            if check_cancelled_callback:
+                check_cancelled_callback()
+
+            if status_callback:
+                status_callback("Import umap/hdbscan...")
+
             # Lazy imports
             import umap
             import hdbscan
             from sklearn.decomposition import IncrementalPCA
             import numpy as np
+
+            if check_cancelled_callback:
+                check_cancelled_callback()
 
             if status_callback:
                 status_callback("Optimizing data (Incremental PCA)...")
@@ -493,6 +502,10 @@ class ImageDatabase:
             X_reduced = np.vstack(compressed_data)
 
             # --- STEP 3: UMAP (Standard Parallel Execution) ---
+
+            if check_cancelled_callback:
+                check_cancelled_callback()
+
             if status_callback:
                 # With 50 dims, this is fast. With n_epochs=200, it's very fast.
                 status_callback(f"Calculating layout for {len(X_reduced)} items...")

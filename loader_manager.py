@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
 NUM_WORKERS = 8
-MAX_PENDING_JOBS = 100  # New: Limit queue size
+MAX_PENDING_JOBS = 100  # Limit queue size
 
 
 class ThumbnailCache:
@@ -88,12 +88,17 @@ class PersistentWorker(QRunnable):
                             self.manager.job_finished(filepath, None)
                             continue
 
-                        # Scale-on-load: Much faster than loading full res then scaling
-                        reader.setScaledSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
-
-                        # Optional: Quality vs Speed trade-off.
-                        # If scrolling is still choppy, comment out SmoothTransformation.
-                        # reader.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+                        # Get original size to calculate aspect ratio
+                        orig_size = reader.size()
+                        if orig_size.isValid():
+                            # Calculate target size fitting within THUMBNAIL_SIZE box
+                            # while preserving aspect ratio
+                            target_box = QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+                            scaled_size = orig_size.scaled(target_box, Qt.AspectRatioMode.KeepAspectRatio)
+                            reader.setScaledSize(scaled_size)
+                        else:
+                            # Fallback if size can't be read, though unlikely if canRead() passed
+                            reader.setScaledSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
 
                         image = reader.read()
 
@@ -138,7 +143,7 @@ class LoaderManager(QObject):
         self.queue = collections.deque()
         self.pending_jobs = set()
 
-        # NEW: A semaphore acts as a counter for available jobs (starts at 0)
+        # A semaphore acts as a counter for available jobs (starts at 0)
         self.semaphore = QSemaphore(0)
 
         # Start the persistent workers
@@ -161,18 +166,15 @@ class LoaderManager(QObject):
             if filepath in self.pending_jobs:
                 return
 
-            # --- NEW: Cap the queue size ---
+            # Cap the queue size
             # If queue is full, drop the oldest item (the one at the bottom/right)
             # This ensures we only process what is currently on screen (LIFO)
             while len(self.queue) >= MAX_PENDING_JOBS:
                 try:
                     discarded = self.queue.pop()  # Remove oldest
                     self.pending_jobs.discard(discarded)
-                    # We removed an item but the semaphore count is still high.
-                    # The worker will handle this empty slot gracefully.
                 except IndexError:
                     break
-            # -------------------------------
 
             self.pending_jobs.add(filepath)
             # Add to the FRONT of the queue (LIFO priority).
@@ -203,29 +205,19 @@ class LoaderManager(QObject):
                 self.semaphore.release(1)
                 return None
 
-            # --- NEW: Safe pop ---
+            # Safe pop
             try:
                 # Take from the FRONT of the queue (LIFO).
                 return self.queue.popleft()
             except IndexError:
-                # This happens if we dropped items in request_thumbnail.
-                # The semaphore let us in, but the queue is empty.
-                # Return None so the worker simply loops again.
                 return None
-            # ---------------------
 
     def job_finished(self, filepath: str, image: QImage | None):
         """
         Called by a worker when it completes a job.
-        NOTE: This method might be called from the worker thread context.
-        We must be careful to handle QImage -> QPixmap conversion on the main thread.
         """
         if self._is_shutting_down:
             return
-
-        # We need to handle the QImage -> QPixmap conversion carefully.
-        # If this method runs in the worker thread, we can't create QPixmap here.
-        # Strategy: Use QMetaObject.invokeMethod to push the result to the main thread
 
         if image:
             # Enqueue the conversion to run on the main thread
@@ -235,8 +227,6 @@ class LoaderManager(QObject):
 
         with QMutexLocker(self.mutex):
             self.pending_jobs.discard(filepath)
-            # NO NEED FOR WAKE SIGNAL: The worker loops back immediately,
-            # and if another job is available, it will acquire the semaphore.
 
     @Slot(str, QImage)
     def _handle_finished_job(self, filepath: str, image: QImage):
@@ -247,7 +237,6 @@ class LoaderManager(QObject):
             thumbnail_cache.put(filepath, pixmap)
             self.thumbnail_loaded.emit(filepath)
         except Exception:
-            # If QPixmap creation fails (e.g. during shutdown), ignore
             pass
 
     def shutdown(self):
@@ -261,12 +250,10 @@ class LoaderManager(QObject):
             self.pending_jobs.clear()
 
         # 2. Wake up all workers so they see the flag
-        # We release enough semaphores for all workers + buffer
         self.semaphore.release(NUM_WORKERS * 2)
 
         # 3. Wait for threads
         logger.info("Waiting for thread pool to clear...")
-        # Don't wait forever; if a thread is stuck on a bad C-call, we proceed to exit
         is_cleared = self.thread_pool.waitForDone(2000)
 
         if not is_cleared:

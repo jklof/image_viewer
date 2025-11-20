@@ -40,10 +40,11 @@ from PySide6.QtWidgets import (
 from query_builder import UniversalQueryBuilder
 from qt_visualizer import QtVisualizer
 from loading_spinner import PulsingSpinner
-from ui_components import SearchResultDelegate, FILEPATH_ROLE
+from ui_components import SearchResultDelegate, FILEPATH_ROLE, SmoothListView
 from virtual_model import ImageResultModel
 from loader_manager import loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
+from constants import ITEM_WIDTH, ITEM_HEIGHT
 
 # --- NEW IMPORT ---
 import icons
@@ -387,11 +388,14 @@ class MainWindow(QMainWindow):
         loading_layout.addWidget(self.loading_spinner)
         loading_layout.addWidget(self.loading_message_label)
 
-        self.results_view = QListView()
+        self.results_view = SmoothListView()
         self.results_view.setViewMode(QListView.ViewMode.IconMode)
         self.results_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.results_view.setMovement(QListView.Movement.Static)
         self.results_view.setSpacing(10)
+        # Add a little padding to the grid size to ensure spacing works visually
+        self.results_view.setGridSize(QSize(ITEM_WIDTH + 10, ITEM_HEIGHT + 10))
+
         self.results_view.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.results_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.results_view.setUniformItemSizes(True)

@@ -46,10 +46,14 @@ class ImageResultModel(QAbstractListModel):
             cached_pixmap = thumbnail_cache.get(filepath)
 
             if cached_pixmap:
-                return QIcon(cached_pixmap)
+                # --- FIX 2: Return QPixmap directly, avoid QIcon wrapper ---
+                return cached_pixmap
             else:
                 loader_manager.request_thumbnail(filepath)
+                # Use a cached pixmap for the placeholder too if possible,
+                # but returning the icon here is fine for the loading state
                 return self.placeholder_icon
+
         return None
 
     # --- NEW: Drag and Drop Support ---
