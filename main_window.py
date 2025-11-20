@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl, QRect
 from PySide6.QtGui import (
     QAction,
     QPixmap,
@@ -11,6 +11,11 @@ from PySide6.QtGui import (
     QColor,
     QDrag,
     QMouseEvent,
+    QPainter,
+    QPen,
+    QBrush,
+    QPolygon,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,9 +41,122 @@ from qt_visualizer import QtVisualizer
 from loading_spinner import PulsingSpinner
 from ui_components import SearchResultDelegate, FILEPATH_ROLE
 from virtual_model import ImageResultModel
+from loader_manager import loader_manager, thumbnail_cache
 
 
 logger = logging.getLogger(__name__)
+
+
+class NavThumbnail(QWidget):
+    """
+    A floating navigation button displaying a thumbnail.
+    It is sized dynamically by the parent container.
+    """
+    clicked = Signal()
+
+    def __init__(self, direction="next", parent=None):
+        super().__init__(parent)
+        self.direction = direction  # "prev" or "next"
+        self.filepath = None
+        
+        # Fixed width, height is controlled by parent resizeEvent
+        self.setFixedWidth(160) 
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # Connect to global loader to refresh when thumb is ready
+        loader_manager.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        self._is_hovered = False
+
+    def set_filepath(self, path: str | None):
+        self.filepath = path
+        # Hide completely if no image exists in that direction
+        self.setVisible(path is not None)
+        if path and not thumbnail_cache.get(path):
+            loader_manager.request_thumbnail(path)
+        self.update()
+
+    @Slot(str)
+    def _on_thumbnail_loaded(self, path: str):
+        if path == self.filepath:
+            self.update()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self.filepath:
+            self.clicked.emit()
+
+    def enterEvent(self, event):
+        self._is_hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._is_hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        if not self.filepath:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw slightly smaller than full rect to have a nice "floating" look
+        draw_rect = self.rect().adjusted(5, 5, -5, -5)
+
+        # 1. Background (Dark card look)
+        path = QRegion(draw_rect, QRegion.RegionType.Ellipse if False else QRegion.RegionType.Rectangle)
+        # Rounded corners
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(45, 45, 45))
+        painter.drawRoundedRect(draw_rect, 8, 8)
+
+        # 2. Draw Thumbnail
+        pixmap = thumbnail_cache.get(self.filepath)
+        if pixmap:
+            # Calculate aspect ratio fit within the rounded rect
+            scaled = pixmap.scaled(
+                draw_rect.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            x = draw_rect.center().x() - scaled.width() // 2
+            y = draw_rect.center().y() - scaled.height() // 2
+            
+            # Clip to rounded rect
+            painter.save()
+            painter.setClipRect(draw_rect)
+            painter.drawPixmap(x, y, scaled)
+            painter.restore()
+        
+        # 3. Arrow Overlay
+        # Stronger overlay on hover
+        if self._is_hovered:
+            painter.setBrush(QColor(255, 255, 255, 40))
+            painter.drawRoundedRect(draw_rect, 8, 8)
+
+        # Arrow geometry
+        arrow_size = 16
+        cx, cy = draw_rect.center().x(), draw_rect.center().y()
+        
+        # Shadow for arrow
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawEllipse(QPoint(cx, cy), arrow_size + 4, arrow_size + 4)
+
+        painter.setBrush(QBrush(QColor(255, 255, 255, 240)))
+        if self.direction == "prev":
+            points = [
+                QPoint(cx + 4, cy - 8),
+                QPoint(cx - 6, cy),
+                QPoint(cx + 4, cy + 8),
+            ]
+        else:
+            points = [
+                QPoint(cx - 4, cy - 8),
+                QPoint(cx + 6, cy),
+                QPoint(cx - 4, cy + 8),
+            ]
+        painter.drawPolygon(QPolygon(points))
 
 
 class SingleImageViewer(QWidget):
@@ -49,27 +167,92 @@ class SingleImageViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.current_filepath = None  # Store the path for drag-and-drop
+        self.current_filepath = None
 
-        layout = QVBoxLayout(self)
+        # Main horizontal layout
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 0, 10, 0)
+        main_layout.setSpacing(10)
+
+        # --- Previous Button Container (Left) ---
+        # We use a VBox with stretchers to center the button vertically
+        prev_container_layout = QVBoxLayout()
+        prev_container_layout.addStretch(1)
+        self.prev_btn = NavThumbnail("prev", self)
+        self.prev_btn.clicked.connect(self.prev_requested.emit)
+        prev_container_layout.addWidget(self.prev_btn)
+        prev_container_layout.addStretch(1)
+        
+        main_layout.addLayout(prev_container_layout)
+
+        # --- Main Image (Center) ---
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.image_label, 1)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_label.setMinimumSize(200, 200)
+        # Allow dropping logic to work on the label area
+        self.image_label.setAcceptDrops(False) 
+        
+        main_layout.addWidget(self.image_label, 1) # 1 = stretch factor (takes available space)
 
-    def set_image(self, filepath: str):
-        """Stores the filepath and loads the pixmap for display."""
-        self.current_filepath = filepath
-        if not filepath:
-            self.image_label.setPixmap(QPixmap())  # Clear the image
+        # --- Next Button Container (Right) ---
+        next_container_layout = QVBoxLayout()
+        next_container_layout.addStretch(1)
+        self.next_btn = NavThumbnail("next", self)
+        self.next_btn.clicked.connect(self.next_requested.emit)
+        next_container_layout.addWidget(self.next_btn)
+        next_container_layout.addStretch(1)
+
+        main_layout.addLayout(next_container_layout)
+
+    def set_image_data(self, current_path: str, prev_path: str | None, next_path: str | None):
+        """
+        Sets the current main image and the side navigation thumbnails.
+        """
+        self.current_filepath = current_path
+        self.prev_btn.set_filepath(prev_path)
+        self.next_btn.set_filepath(next_path)
+
+        if not current_path:
+            self.image_label.setPixmap(QPixmap())
             return
 
-        pixmap = QPixmap(filepath)
-        scaled_pixmap = pixmap.scaled(
-            self.image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setPixmap(scaled_pixmap)
+        # Load main image
+        pixmap = QPixmap(current_path)
+        if not pixmap.isNull():
+            self._update_scaled_pixmap(pixmap)
+        else:
+            self.image_label.setText("Could not load image.")
+
+    def _update_scaled_pixmap(self, pixmap: QPixmap = None):
+        """Resizes the current pixmap to fit the label, keeping aspect ratio."""
+        if pixmap is None and self.image_label.pixmap():
+            pixmap = self.image_label.pixmap()
+        
+        if pixmap and not pixmap.isNull():
+            scaled_pixmap = pixmap.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+
+    def resizeEvent(self, event: QResizeEvent):
+        # 1. Update Main Image Scaling
+        if self.current_filepath:
+            pixmap = QPixmap(self.current_filepath)
+            if not pixmap.isNull():
+                self._update_scaled_pixmap(pixmap)
+        
+        # 2. Dynamic Height for Nav Buttons (1/4 of window height)
+        target_height = int(self.height() * 0.25)
+        # Clamp min/max so they don't disappear or look absurd
+        target_height = max(80, min(300, target_height))
+        
+        self.prev_btn.setFixedHeight(target_height)
+        self.next_btn.setFixedHeight(target_height)
+
+        super().resizeEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
@@ -92,23 +275,19 @@ class SingleImageViewer(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self.current_filepath:
             drag = QDrag(self)
             mime_data = QMimeData()
-
             urls = [QUrl.fromLocalFile(self.current_filepath)]
             mime_data.setUrls(urls)
-
             drag.setMimeData(mime_data)
-
-            pixmap = self.image_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
-            drag.setPixmap(pixmap)
-
-            # Set the hot spot to the CENTER of the thumbnail.
-            # This makes the drag operation feel natural, as if holding the image from its middle.
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-
+            
+            if self.image_label.pixmap():
+                # Create a small drag thumbnail
+                pixmap = self.image_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
+                drag.setPixmap(pixmap)
+                drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+            
             drag.exec(Qt.DropAction.CopyAction)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
-        """On double-click, signal to return to the grid view."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.closed.emit()
             event.accept()
@@ -432,13 +611,31 @@ class MainWindow(QMainWindow):
         self._show_current_single_image()
 
     def _update_single_image_view_pixmap(self):
-        if not (0 <= self.current_single_view_index < self.results_model.rowCount()):
+        """
+        Updates the single image viewer with the current image,
+        and sets the previous/next thumbnails for navigation.
+        """
+        total_count = self.results_model.rowCount()
+        if not (0 <= self.current_single_view_index < total_count):
             return
-        _, filepath = self.results_model.results_data[self.current_single_view_index]
 
-        self.single_image_view_widget.set_image(filepath)
+        # Current Image
+        _, current_filepath = self.results_model.results_data[self.current_single_view_index]
+        
+        # Previous Image Path
+        prev_filepath = None
+        if self.current_single_view_index > 0:
+            _, prev_filepath = self.results_model.results_data[self.current_single_view_index - 1]
+            
+        # Next Image Path
+        next_filepath = None
+        if self.current_single_view_index < total_count - 1:
+            _, next_filepath = self.results_model.results_data[self.current_single_view_index + 1]
 
-        status = f"Viewing image {self.current_single_view_index + 1} of {self.results_model.rowCount()} | {Path(filepath).name}"
+        # Update the Viewer widget
+        self.single_image_view_widget.set_image_data(current_filepath, prev_filepath, next_filepath)
+
+        status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
         self.update_status_bar(status)
 
     def _show_current_single_image(self):
@@ -480,8 +677,9 @@ class MainWindow(QMainWindow):
             self._update_single_image_view_pixmap()
 
     def resizeEvent(self, event: QResizeEvent):
+        # Trigger a redraw in the viewer to handle aspect-ratio resizing of the main image
         if self.content_stack.currentWidget() is self.single_image_view_widget:
-            self._update_single_image_view_pixmap()
+            self.single_image_view_widget.resizeEvent(event)
         super().resizeEvent(event)
 
     def copy_image_to_clipboard(self, filepath: str):
