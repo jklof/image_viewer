@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QBrush,
     QPolygon,
     QRegion,
+    QIcon,  # Ensure QIcon is imported
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,37 +43,29 @@ from loading_spinner import PulsingSpinner
 from ui_components import SearchResultDelegate, FILEPATH_ROLE
 from virtual_model import ImageResultModel
 from loader_manager import loader_manager, thumbnail_cache
+from preferences_dialog import PreferencesDialog
 
 # --- NEW IMPORT ---
-from preferences_dialog import PreferencesDialog
+import icons
 
 logger = logging.getLogger(__name__)
 
 
 class NavThumbnail(QWidget):
-    """
-    A floating navigation button displaying a thumbnail.
-    It is sized dynamically by the parent container.
-    """
-
+    # ... (No changes to NavThumbnail class) ...
     clicked = Signal()
 
     def __init__(self, direction="next", parent=None):
         super().__init__(parent)
-        self.direction = direction  # "prev" or "next"
+        self.direction = direction
         self.filepath = None
-
-        # Fixed width, height is controlled by parent resizeEvent
         self.setFixedWidth(160)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        # Connect to global loader to refresh when thumb is ready
         loader_manager.thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self._is_hovered = False
 
     def set_filepath(self, path: str | None):
         self.filepath = path
-        # Hide completely if no image exists in that direction
         self.setVisible(path is not None)
         if path and not thumbnail_cache.get(path):
             loader_manager.request_thumbnail(path)
@@ -103,64 +96,46 @@ class NavThumbnail(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Draw slightly smaller than full rect to have a nice "floating" look
         draw_rect = self.rect().adjusted(5, 5, -5, -5)
 
-        # 1. Background (Dark card look)
         path = QRegion(draw_rect, QRegion.RegionType.Ellipse if False else QRegion.RegionType.Rectangle)
-        # Rounded corners
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(45, 45, 45))
         painter.drawRoundedRect(draw_rect, 8, 8)
 
-        # 2. Draw Thumbnail
         pixmap = thumbnail_cache.get(self.filepath)
         if pixmap:
-            # Calculate aspect ratio fit within the rounded rect
             scaled = pixmap.scaled(
                 draw_rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
             x = draw_rect.center().x() - scaled.width() // 2
             y = draw_rect.center().y() - scaled.height() // 2
 
-            # Clip to rounded rect
             painter.save()
             painter.setClipRect(draw_rect)
             painter.drawPixmap(x, y, scaled)
             painter.restore()
 
-        # 3. Arrow Overlay
-        # Stronger overlay on hover
         if self._is_hovered:
             painter.setBrush(QColor(255, 255, 255, 40))
             painter.drawRoundedRect(draw_rect, 8, 8)
 
-        # Arrow geometry
         arrow_size = 16
         cx, cy = draw_rect.center().x(), draw_rect.center().y()
 
-        # Shadow for arrow
         painter.setBrush(QColor(0, 0, 0, 150))
         painter.drawEllipse(QPoint(cx, cy), arrow_size + 4, arrow_size + 4)
 
         painter.setBrush(QBrush(QColor(255, 255, 255, 240)))
         if self.direction == "prev":
-            points = [
-                QPoint(cx + 4, cy - 8),
-                QPoint(cx - 6, cy),
-                QPoint(cx + 4, cy + 8),
-            ]
+            points = [QPoint(cx + 4, cy - 8), QPoint(cx - 6, cy), QPoint(cx + 4, cy + 8)]
         else:
-            points = [
-                QPoint(cx - 4, cy - 8),
-                QPoint(cx + 6, cy),
-                QPoint(cx - 4, cy + 8),
-            ]
+            points = [QPoint(cx - 4, cy - 8), QPoint(cx + 6, cy), QPoint(cx - 4, cy + 8)]
         painter.drawPolygon(QPolygon(points))
 
 
 class SingleImageViewer(QWidget):
+    # ... (No changes to SingleImageViewer logic, just including for context) ...
     closed = Signal()
     next_requested = Signal()
     prev_requested = Signal()
@@ -170,13 +145,10 @@ class SingleImageViewer(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.current_filepath = None
 
-        # Main horizontal layout
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 0, 10, 0)
         main_layout.setSpacing(10)
 
-        # --- Previous Button Container (Left) ---
-        # We use a VBox with stretchers to center the button vertically
         prev_container_layout = QVBoxLayout()
         prev_container_layout.addStretch(1)
         self.prev_btn = NavThumbnail("prev", self)
@@ -186,17 +158,14 @@ class SingleImageViewer(QWidget):
 
         main_layout.addLayout(prev_container_layout)
 
-        # --- Main Image (Center) ---
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.image_label.setMinimumSize(200, 200)
-        # Allow dropping logic to work on the label area
         self.image_label.setAcceptDrops(False)
 
-        main_layout.addWidget(self.image_label, 1)  # 1 = stretch factor (takes available space)
+        main_layout.addWidget(self.image_label, 1)
 
-        # --- Next Button Container (Right) ---
         next_container_layout = QVBoxLayout()
         next_container_layout.addStretch(1)
         self.next_btn = NavThumbnail("next", self)
@@ -207,9 +176,6 @@ class SingleImageViewer(QWidget):
         main_layout.addLayout(next_container_layout)
 
     def set_image_data(self, current_path: str, prev_path: str | None, next_path: str | None):
-        """
-        Sets the current main image and the side navigation thumbnails.
-        """
         self.current_filepath = current_path
         self.prev_btn.set_filepath(prev_path)
         self.next_btn.set_filepath(next_path)
@@ -218,7 +184,6 @@ class SingleImageViewer(QWidget):
             self.image_label.setPixmap(QPixmap())
             return
 
-        # Load main image
         pixmap = QPixmap(current_path)
         if not pixmap.isNull():
             self._update_scaled_pixmap(pixmap)
@@ -226,7 +191,6 @@ class SingleImageViewer(QWidget):
             self.image_label.setText("Could not load image.")
 
     def _update_scaled_pixmap(self, pixmap: QPixmap = None):
-        """Resizes the current pixmap to fit the label, keeping aspect ratio."""
         if pixmap is None and self.image_label.pixmap():
             pixmap = self.image_label.pixmap()
 
@@ -239,15 +203,12 @@ class SingleImageViewer(QWidget):
             self.image_label.setPixmap(scaled_pixmap)
 
     def resizeEvent(self, event: QResizeEvent):
-        # 1. Update Main Image Scaling
         if self.current_filepath:
             pixmap = QPixmap(self.current_filepath)
             if not pixmap.isNull():
                 self._update_scaled_pixmap(pixmap)
 
-        # 2. Dynamic Height for Nav Buttons (1/4 of window height)
         target_height = int(self.height() * 0.25)
-        # Clamp min/max so they don't disappear or look absurd
         target_height = max(80, min(300, target_height))
 
         self.prev_btn.setFixedHeight(target_height)
@@ -281,7 +242,6 @@ class SingleImageViewer(QWidget):
             drag.setMimeData(mime_data)
 
             if self.image_label.pixmap():
-                # Create a small drag thumbnail
                 pixmap = self.image_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
                 drag.setPixmap(pixmap)
                 drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
@@ -340,40 +300,47 @@ class MainWindow(QMainWindow):
         action_bar_layout = QHBoxLayout()
         action_bar_layout.setSpacing(10)
 
-        # --- Use a consistent fixed height for all buttons in this row ---
         ACTION_BAR_BUTTON_HEIGHT = 35
 
         # --- Group 1: Left-aligned action buttons ---
         self.random_order_btn = QPushButton("Random Order")
         self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
+        # --- SET ICON ---
+        self.random_order_btn.setIcon(icons.create_icon(icons.SVG_SHUFFLE))
 
         self.sort_by_date_btn = QPushButton("Sort by Date")
         self.sort_by_date_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.sort_by_date_btn.setToolTip("Sort all images by modification date (newest first).")
+        # --- SET ICON ---
+        self.sort_by_date_btn.setIcon(icons.create_icon(icons.SVG_CALENDAR))
 
         self.toggle_view_btn = QPushButton("Single View")
         self.toggle_view_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.toggle_view_btn.setToolTip("Toggle between grid and single image view.")
         self.toggle_view_btn.setEnabled(False)
+        # --- SET ICON (Initial) ---
+        self.toggle_view_btn.setIcon(icons.create_icon(icons.SVG_IMAGE))
 
         self.visualize_btn = QPushButton("Visualize Embeddings")
         self.visualize_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.visualize_btn.setToolTip("View a 2D visualization of all image embeddings.")
+        # --- SET ICON ---
+        self.visualize_btn.setIcon(icons.create_icon(icons.SVG_CHART))
 
         action_bar_layout.addWidget(self.random_order_btn)
         action_bar_layout.addWidget(self.sort_by_date_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
         action_bar_layout.addWidget(self.visualize_btn)
 
-        # --- Spacer: Pushes the next widgets to the right ---
         action_bar_layout.addStretch()
 
         # --- Group 2: Right-aligned sync/settings controls ---
-        # -- NEW SETTINGS BUTTON --
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.settings_btn.setToolTip("Configure directories, database location, and model.")
+        # --- SET ICON ---
+        self.settings_btn.setIcon(icons.create_icon(icons.SVG_SETTINGS))
         action_bar_layout.addWidget(self.settings_btn)
 
         self.sync_stack = QStackedWidget()
@@ -383,6 +350,8 @@ class MainWindow(QMainWindow):
         # Page 0: Idle Button
         self.start_sync_btn = QPushButton("Synchronize")
         self.start_sync_btn.setToolTip("Scan configured directories and update the database.")
+        # --- SET ICON ---
+        self.start_sync_btn.setIcon(icons.create_icon(icons.SVG_SYNC))
         self.sync_stack.addWidget(self.start_sync_btn)
 
         # Page 1: Active Status Bar
@@ -393,13 +362,15 @@ class MainWindow(QMainWindow):
         self.sync_progress_bar = QProgressBar()
         self.sync_progress_bar.setTextVisible(False)
         self.sync_cancel_btn = QPushButton("Cancel")
+        # --- SET ICON ---
+        self.sync_cancel_btn.setIcon(icons.create_icon(icons.SVG_CANCEL))
+
         status_layout.addWidget(self.sync_status_label, 1)
         status_layout.addWidget(self.sync_progress_bar, 2)
         status_layout.addWidget(self.sync_cancel_btn)
         self.sync_stack.addWidget(sync_status_bar)
 
         action_bar_layout.addWidget(self.sync_stack)
-        # --- End Sync Stack ---
 
         content_layout.addLayout(action_bar_layout)
 
@@ -468,16 +439,12 @@ class MainWindow(QMainWindow):
         self.toggle_view_btn.clicked.connect(self._on_toggle_view_clicked)
         self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
         self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
-        # --- NEW SIGNAL CONNECTION ---
         self.settings_btn.clicked.connect(self._on_settings_clicked)
 
     @Slot()
     def _on_settings_clicked(self):
-        """Opens the preferences dialog."""
         dlg = PreferencesDialog(self)
         dlg.exec()
-        # We don't explicitly reload here because 'Sync' handles directories,
-        # and other changes require a restart (which the dialog alerts).
 
     def _update_toggle_view_button_state(self):
         is_enabled = self.results_model.rowCount() > 0
@@ -485,13 +452,17 @@ class MainWindow(QMainWindow):
 
         if not is_enabled:
             self.toggle_view_btn.setText("Single View")
+            self.toggle_view_btn.setIcon(icons.create_icon(icons.SVG_IMAGE))
             return
 
         current_widget = self.content_stack.currentWidget()
+        # If we are in Single or Visualizer view, button goes back to Grid
         if current_widget is self.single_image_view_widget or current_widget is self.visualizer_widget:
             self.toggle_view_btn.setText("Grid View")
+            self.toggle_view_btn.setIcon(icons.create_icon(icons.SVG_GRID))
         else:
             self.toggle_view_btn.setText("Single View")
+            self.toggle_view_btn.setIcon(icons.create_icon(icons.SVG_IMAGE))
 
     @Slot(str)
     def _on_visualizer_image_selected(self, image_path: str):
@@ -502,11 +473,13 @@ class MainWindow(QMainWindow):
         self.query_builder.set_interactive_controls_enabled(enabled)
         self.random_order_btn.setEnabled(enabled)
         self.sort_by_date_btn.setEnabled(enabled)
-        self.settings_btn.setEnabled(enabled)  # Manage settings button too
+        self.settings_btn.setEnabled(enabled)
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
         else:
             self._update_toggle_view_button_state()
+
+    # ... (Rest of the class remains identical) ...
 
     # --- Slots for Controller to manage Sync UI ---
     def show_sync_active_view(self):
@@ -525,10 +498,6 @@ class MainWindow(QMainWindow):
         self.sync_cancel_btn.setEnabled(enabled)
 
     def show_sync_prompt_view(self):
-        """
-        Displays a message prompting the user to sync the database
-        when no images are found on startup.
-        """
         self.loading_spinner.stop_animation()
         self.loading_message_label.setText("No images found.\n\nPlease Synchronize to build your database.")
         self.loading_message_label.setStyleSheet("font-size: 18px; color: #ccc;")
@@ -632,28 +601,20 @@ class MainWindow(QMainWindow):
         self._show_current_single_image()
 
     def _update_single_image_view_pixmap(self):
-        """
-        Updates the single image viewer with the current image,
-        and sets the previous/next thumbnails for navigation.
-        """
         total_count = self.results_model.rowCount()
         if not (0 <= self.current_single_view_index < total_count):
             return
 
-        # Current Image
         _, current_filepath = self.results_model.results_data[self.current_single_view_index]
 
-        # Previous Image Path
         prev_filepath = None
         if self.current_single_view_index > 0:
             _, prev_filepath = self.results_model.results_data[self.current_single_view_index - 1]
 
-        # Next Image Path
         next_filepath = None
         if self.current_single_view_index < total_count - 1:
             _, next_filepath = self.results_model.results_data[self.current_single_view_index + 1]
 
-        # Update the Viewer widget
         self.single_image_view_widget.set_image_data(current_filepath, prev_filepath, next_filepath)
 
         status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
@@ -698,7 +659,6 @@ class MainWindow(QMainWindow):
             self._update_single_image_view_pixmap()
 
     def resizeEvent(self, event: QResizeEvent):
-        # Trigger a redraw in the viewer to handle aspect-ratio resizing of the main image
         if self.content_stack.currentWidget() is self.single_image_view_widget:
             self.single_image_view_widget.resizeEvent(event)
         super().resizeEvent(event)
