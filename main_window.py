@@ -42,7 +42,8 @@ from loading_spinner import PulsingSpinner
 from ui_components import SearchResultDelegate, FILEPATH_ROLE
 from virtual_model import ImageResultModel
 from loader_manager import loader_manager, thumbnail_cache
-
+# --- NEW IMPORT ---
+from preferences_dialog import PreferencesDialog
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +369,13 @@ class MainWindow(QMainWindow):
         # --- Spacer: Pushes the next widgets to the right ---
         action_bar_layout.addStretch()
 
-        # --- Group 2: Right-aligned sync controls ---
+        # --- Group 2: Right-aligned sync/settings controls ---
+        # -- NEW SETTINGS BUTTON --
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
+        self.settings_btn.setToolTip("Configure directories, database location, and model.")
+        action_bar_layout.addWidget(self.settings_btn)
+
         self.sync_stack = QStackedWidget()
         self.sync_stack.setMinimumWidth(250)
         self.sync_stack.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
@@ -461,6 +468,16 @@ class MainWindow(QMainWindow):
         self.toggle_view_btn.clicked.connect(self._on_toggle_view_clicked)
         self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
         self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
+        # --- NEW SIGNAL CONNECTION ---
+        self.settings_btn.clicked.connect(self._on_settings_clicked)
+
+    @Slot()
+    def _on_settings_clicked(self):
+        """Opens the preferences dialog."""
+        dlg = PreferencesDialog(self)
+        dlg.exec()
+        # We don't explicitly reload here because 'Sync' handles directories,
+        # and other changes require a restart (which the dialog alerts).
 
     def _update_toggle_view_button_state(self):
         is_enabled = self.results_model.rowCount() > 0
@@ -485,6 +502,7 @@ class MainWindow(QMainWindow):
         self.query_builder.set_interactive_controls_enabled(enabled)
         self.random_order_btn.setEnabled(enabled)
         self.sort_by_date_btn.setEnabled(enabled)
+        self.settings_btn.setEnabled(enabled) # Manage settings button too
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
         else:
@@ -494,9 +512,11 @@ class MainWindow(QMainWindow):
     def show_sync_active_view(self):
         self.sync_stack.setCurrentIndex(1)
         self.sync_cancel_btn.setEnabled(True)
+        self.settings_btn.setEnabled(False) # Disable settings during sync
 
     def show_sync_idle_view(self):
         self.sync_stack.setCurrentIndex(0)
+        self.settings_btn.setEnabled(True)
 
     def set_sync_controls_enabled(self, enabled: bool):
         self.start_sync_btn.setEnabled(enabled)
@@ -516,6 +536,7 @@ class MainWindow(QMainWindow):
 
         self.set_controls_enabled(False)
         self.set_sync_controls_enabled(True)
+        self.settings_btn.setEnabled(True) # Allow settings even if empty
         self.show_sync_idle_view()
         self.update_status_bar("Ready. Please run a sync to begin.")
 
