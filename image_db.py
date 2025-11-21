@@ -289,7 +289,11 @@ class ImageDatabase:
             logger.warning(f"Synchronization cancelled by user: {e}")
             raise
         finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+            try:
+                executor.shutdown(wait=True, cancel_futures=True)
+            except Exception as e:
+                logger.warning(f"Executor took too long to shutdown: {e}")
+                # Allow program to continue even if shutdown hangs
 
     def _reconcile_model_id(self):
         db_model_id, config_model_id = self._get_metadata("model_id"), self.embedder.model_id
