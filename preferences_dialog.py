@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QWidget,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from config_utils import load_config, save_config
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,8 @@ KNOWN_MODELS = [
 
 
 class PreferencesDialog(QDialog):
+    preferences_saved = Signal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
@@ -159,4 +161,5 @@ class PreferencesDialog(QDialog):
                 "You have changed settings (Database or Model) that require an application restart to take effect.",
             )
 
+        self.preferences_saved.emit(restart_needed)
         self.accept()

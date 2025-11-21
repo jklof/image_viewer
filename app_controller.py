@@ -21,6 +21,9 @@ class AppController(QObject):
     Orchestrates UI, a background sync worker, and a background backend worker.
     """
 
+    # Signal to indicate when preferences are saved
+    preferences_saved = Signal(bool)
+
     def __init__(self, main_window: "MainWindow", use_cpu_only: bool = False):
         super().__init__()
 
@@ -28,6 +31,7 @@ class AppController(QObject):
             raise ValueError("AppController requires a MainWindow instance.")
 
         self.window = main_window
+        self._use_cpu_only = use_cpu_only  # Store for soft restart
 
         self.backend_job_queue = queue.Queue()
         self.backend_signals = BackendSignals()
@@ -59,6 +63,9 @@ class AppController(QObject):
         self.window.sync_triggered.connect(self.on_sync_requested)
         self.window.sync_cancel_triggered.connect(self.on_sync_cancel_requested)
 
+        # Add the new preferences_saved signal connection
+        self.window.preferences_saved.connect(self.on_preferences_saved)
+
         # Backend Signals to Controller Slots
         self.backend_signals.initialized.connect(self.on_backend_initialized)
         self.backend_signals.error.connect(self.on_backend_error)
@@ -70,6 +77,81 @@ class AppController(QObject):
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
         self.window.visualizer_widget.status_update.connect(self.window.update_status_bar)
+
+    @Slot(bool)
+    def on_preferences_saved(self, requires_restart: bool):
+        """
+        Handle soft restart when preferences are saved that require backend restart.
+
+        Args:
+            requires_restart: True if database path or model ID was changed
+        """
+        if not requires_restart:
+            return  # No restart needed for directory changes
+
+        logger.info("Soft restart initiated due to database/model changes.")
+
+        # Disable controls during restart
+        self.window.set_controls_enabled(False)
+
+        # Cancel and wait for any running sync operation
+        if self.sync_thread and self.sync_thread.isRunning():
+            logger.info("Cancelling active sync operation for soft restart...")
+            self.on_sync_cancel_requested()
+            self.sync_thread.quit()
+            if not self.sync_thread.wait(5000):  # Wait up to 5 seconds
+                logger.warning("Sync thread did not exit gracefully, forcing termination")
+                self.sync_thread.terminate()
+            self.sync_thread = None
+            self.sync_worker = None
+
+        # Shutdown current backend
+        logger.info("Shutting down current backend worker...")
+        self.backend_worker.shutdown()
+        self.backend_thread.join(timeout=5)
+
+        # Re-initialize backend components with new configuration
+        logger.info("Re-initializing backend with new configuration...")
+        self.backend_job_queue = queue.Queue()
+        self.backend_signals = BackendSignals()
+        self.backend_worker = BackendWorker(
+            signals=self.backend_signals, job_queue=self.backend_job_queue, use_cpu_only=self._use_cpu_only
+        )
+        self.backend_thread = threading.Thread(target=self.backend_worker.run, daemon=True)
+
+        # Reconnect signals for the new backend
+        self._connect_backend_signals()
+
+        # Restart backend thread
+        logger.info("Starting new backend worker thread...")
+        self.backend_thread.start()
+
+        # Clear cached data as it may be invalid with new configuration
+        self._cached_visualization_data = None
+        self._visualization_data_dirty = True
+
+        logger.info("Soft restart completed successfully.")
+
+    def _connect_backend_signals(self):
+        """Reconnect backend signals after soft restart."""
+        # Disconnect existing backend signals first
+        try:
+            self.backend_signals.initialized.disconnect(self.on_backend_initialized)
+            self.backend_signals.error.disconnect(self.on_backend_error)
+            self.backend_signals.results_ready.disconnect(self.on_results_ready)
+            self.backend_signals.status_update.disconnect(self.window.update_status_bar)
+            self.backend_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
+            self.backend_signals.reloaded.disconnect(self.on_backend_reloaded)
+        except:
+            pass  # Ignore disconnection errors
+
+        # Reconnect backend signals
+        self.backend_signals.initialized.connect(self.on_backend_initialized)
+        self.backend_signals.error.connect(self.on_backend_error)
+        self.backend_signals.results_ready.connect(self.on_results_ready)
+        self.backend_signals.status_update.connect(self.window.update_status_bar)
+        self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
+        self.backend_signals.reloaded.connect(self.on_backend_reloaded)
 
     @Slot()
     def on_backend_initialized(self):
@@ -156,7 +238,7 @@ class AppController(QObject):
         self.window.show_sync_active_view()
         self.window.update_status_bar("Sync started. You can continue searching on existing data.")
         self.sync_thread = QThread()
-        self.sync_worker = SyncWorker(use_cpu_only=self.backend_worker.use_cpu_only)
+        self.sync_worker = SyncWorker(use_cpu_only=self._use_cpu_only)
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_worker.status_update.connect(self.window.update_sync_status)
         self.sync_worker.progress_update.connect(self.window.update_sync_progress)

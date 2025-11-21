@@ -264,6 +264,7 @@ class MainWindow(QMainWindow):
     sort_by_date_triggered = Signal()
     sync_triggered = Signal()
     sync_cancel_triggered = Signal()
+    preferences_saved = Signal(bool)
     closing = Signal()
 
     def __init__(self):
@@ -448,6 +449,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_settings_clicked(self):
         dlg = PreferencesDialog(self)
+        dlg.preferences_saved.connect(self.preferences_saved.emit)
         dlg.exec()
 
     def _update_toggle_view_button_state(self):
