@@ -31,6 +31,11 @@ def main():
         logger.info("For a dark theme, install with: pip install pyqtdarktheme")
 
     window = MainWindow()
+
+    # --- INITIALIZE LOADER ---
+    # Must be done after QApplication is created so QTimer can start.
+    loader_manager.initialize()
+
     controller = AppController(main_window=window, use_cpu_only=args.cpu_only)
     controller.initialize_app()
     window.show()

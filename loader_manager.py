@@ -1,4 +1,6 @@
 import collections
+import logging
+
 from PySide6.QtCore import (
     QObject,
     Qt,
@@ -9,26 +11,22 @@ from PySide6.QtCore import (
     QMutex,
     QMutexLocker,
     QSemaphore,
-    QMetaObject,
-    Q_ARG,
-    QSize,
+    QThread,
 )
-from PySide6.QtGui import QPixmap, QImage, QImageReader
+from PySide6.QtGui import QPixmap, QImage, QColor
 from ui_components import THUMBNAIL_SIZE
-
-import logging
-import traceback  # Import traceback for safe logging
 
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
-NUM_WORKERS = 8
-MAX_PENDING_JOBS = 100  # Limit queue size
+# Leave 1 core free for the Main Thread/OS to keep mouse movement smooth
+NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
+MAX_PENDING_JOBS = 100
 
 
 class ThumbnailCache:
-    """A simple thread-safe LRU cache for QPixmap objects."""
+    """Thread-safe LRU cache."""
 
     def __init__(self, size):
         self.cache = collections.OrderedDict()
@@ -51,87 +49,61 @@ class ThumbnailCache:
                 self.cache.popitem(last=False)
 
 
-# Global cache instance
 thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
 
 
 class PersistentWorker(QRunnable):
-    """A persistent worker that continuously pulls jobs from the manager."""
-
     def __init__(self, manager: "LoaderManager"):
         super().__init__()
         self.manager = manager
-        # This worker should not be deleted by the thread pool when it's done
         self.setAutoDelete(False)
 
     def run(self):
-        """
-        EXCEPTION SAFETY:
-        This entire method is wrapped to prevent exceptions from propagating
-        back to the QThreadPool during application shutdown.
-        """
         try:
             while not self.manager._is_shutting_down:
+                filepath = self.manager.get_next_job()
+                if not filepath:
+                    continue
+
                 try:
-                    filepath = self.manager.get_next_job()
-                    if filepath:
-                        # 1. Check cache first
-                        if thumbnail_cache.get(filepath):
-                            self.manager.job_finished(filepath, None)
-                            continue
+                    # 1. Check cache (Fast path)
+                    if thumbnail_cache.get(filepath):
+                        continue
 
-                        # 2. Optimized Loading with QImageReader
-                        reader = QImageReader(filepath)
+                    # 2. Load Image (Blocking IO, but safe in thread)
+                    # QImage(path) is robust and avoids Windows file-locking contention
+                    image = QImage(filepath)
 
-                        # Check if readable (fast check)
-                        if not reader.canRead():
-                            self.manager.job_finished(filepath, None)
-                            continue
+                    if not image.isNull():
+                        # 3. Scale HIGH QUALITY (Worker Thread CPU)
+                        if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
+                            image = image.scaled(
+                                THUMBNAIL_SIZE,
+                                THUMBNAIL_SIZE,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
 
-                        # Get original size to calculate aspect ratio
-                        orig_size = reader.size()
-                        if orig_size.isValid():
-                            # Calculate target size fitting within THUMBNAIL_SIZE box
-                            # while preserving aspect ratio
-                            target_box = QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
-                            scaled_size = orig_size.scaled(target_box, Qt.AspectRatioMode.KeepAspectRatio)
-                            reader.setScaledSize(scaled_size)
-                        else:
-                            # Fallback if size can't be read, though unlikely if canRead() passed
-                            reader.setScaledSize(QSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE))
-
-                        image = reader.read()
-
-                        if not image.isNull():
-                            self.manager.job_finished(filepath, image)
-                        else:
-                            self.manager.job_finished(filepath, None)
+                        # 4. Send to Manager via Signal
+                        # Qt handles the thread-safe handover to the main thread
+                        self.manager._internal_worker_result.emit(filepath, image)
+                    else:
+                        # Handle corrupt file result
+                        self.manager._internal_worker_result.emit(filepath, QImage())
 
                 except Exception:
-                    # Catch individual job failures so the worker keeps running
-                    # unless it's a shutdown issue.
-                    if self.manager._is_shutting_down:
-                        break
-                    # Log debug, but don't spam error logs for corrupt images
-                    logger.debug(f"Error loading thumbnail for {filepath}")
+                    pass  # Skip corrupt files silently
 
-        except (KeyboardInterrupt, SystemExit):
-            # Allow standard python exit signals to pass cleanly
-            pass
         except Exception:
-            # Catch catastrophic failures (e.g. QImage bindings destroyed)
-            # Log only if not shutting down, otherwise suppress to avoid noise
-            if not self.manager._is_shutting_down:
-                logger.error(f"PersistentWorker crashed:\n{traceback.format_exc()}")
+            pass
 
 
 class LoaderManager(QObject):
-    """
-    Manages a thread pool using QSemaphore for job synchronization,
-    ensuring a simple, race-free producer/consumer pattern.
-    """
-
+    # Public signal for UI
     thumbnail_loaded = Signal(str)
+
+    # Internal signal to bridge Worker Thread -> Main Thread
+    _internal_worker_result = Signal(str, QImage)
 
     def __init__(self):
         super().__init__()
@@ -142,125 +114,91 @@ class LoaderManager(QObject):
         self.mutex = QMutex()
         self.queue = collections.deque()
         self.pending_jobs = set()
-
-        # A semaphore acts as a counter for available jobs (starts at 0)
         self.semaphore = QSemaphore(0)
 
-        # Start the persistent workers
+        # Connect the worker signal to the main thread slot
+        self._internal_worker_result.connect(self._on_worker_result_ready)
+
+    def initialize(self):
+        """Starts the worker threads."""
+        if self._is_shutting_down:
+            return
+
+        logger.info("LoaderManager initializing workers...")
         for _ in range(NUM_WORKERS):
             worker = PersistentWorker(self)
             self.thread_pool.start(worker)
 
     @Slot(str)
     def request_thumbnail(self, filepath: str):
-        """Request a thumbnail. Fast and non-blocking."""
+        """Called by UI (Main Thread)."""
         if self._is_shutting_down:
             return
-
         if thumbnail_cache.get(filepath):
             return
 
-        # --- Producer Logic: Add job and release semaphore ---
         with QMutexLocker(self.mutex):
-            # Check again inside lock for pending status
             if filepath in self.pending_jobs:
                 return
 
-            # Cap the queue size
-            # If queue is full, drop the oldest item (the one at the bottom/right)
-            # This ensures we only process what is currently on screen (LIFO)
+            # LIFO Logic: Drop old requests if queue is full
+            # This ensures the user sees what they are looking at NOW.
             while len(self.queue) >= MAX_PENDING_JOBS:
                 try:
-                    discarded = self.queue.pop()  # Remove oldest
+                    discarded = self.queue.pop()
                     self.pending_jobs.discard(discarded)
                 except IndexError:
                     break
 
             self.pending_jobs.add(filepath)
-            # Add to the FRONT of the queue (LIFO priority).
             self.queue.appendleft(filepath)
 
-        # Signal that one more job is available. This unblocks a waiting worker.
         self.semaphore.release(1)
 
     def get_next_job(self) -> str | None:
-        """
-        Called by workers. Blocks until a job is available, or checks
-        for shutdown after a brief timeout.
-        """
-        # Consumer Logic: Block until a job is available (semaphore counter > 0)
-        # Use a timeout (50ms) to check the shutdown flag periodically
+        """Called by Worker (Worker Thread)."""
         if not self.semaphore.tryAcquire(1, 50):
-            with QMutexLocker(self.mutex):
-                # If we timed out on acquire, check the shutdown flag and exit loop
-                if self._is_shutting_down:
-                    return None
-            return None  # Timed out, worker will loop and try acquiring again
+            return None
 
-        # If acquire succeeded, a job is guaranteed to be in the queue.
         with QMutexLocker(self.mutex):
-            # We check shutdown again, though highly unlikely after a successful acquire
             if self._is_shutting_down:
-                # If we acquired but are shutting down, release the resource and exit
-                self.semaphore.release(1)
                 return None
-
-            # Safe pop
             try:
-                # Take from the FRONT of the queue (LIFO).
                 return self.queue.popleft()
             except IndexError:
                 return None
 
-    def job_finished(self, filepath: str, image: QImage | None):
+    @Slot(str, QImage)
+    def _on_worker_result_ready(self, filepath: str, image: QImage):
         """
-        Called by a worker when it completes a job.
+        Runs on MAIN THREAD.
         """
         if self._is_shutting_down:
             return
 
-        if image:
-            # Enqueue the conversion to run on the main thread
-            QMetaObject.invokeMethod(
-                self, "_handle_finished_job", Qt.QueuedConnection, Q_ARG(str, filepath), Q_ARG(QImage, image)
-            )
-
+        # Cleanup pending set
         with QMutexLocker(self.mutex):
             self.pending_jobs.discard(filepath)
 
-    @Slot(str, QImage)
-    def _handle_finished_job(self, filepath: str, image: QImage):
-        if self._is_shutting_down:
-            return
-        try:
+        if not image.isNull():
+            # Texture upload (fast)
             pixmap = QPixmap.fromImage(image)
             thumbnail_cache.put(filepath, pixmap)
             self.thumbnail_loaded.emit(filepath)
-        except Exception:
-            pass
+        else:
+            # Placeholder for corrupt images
+            error_pixmap = QPixmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+            error_pixmap.fill(QColor(30, 30, 30))
+            thumbnail_cache.put(filepath, error_pixmap)
+            self.thumbnail_loaded.emit(filepath)
 
     def shutdown(self):
-        """Gracefully shuts down the loader."""
-        logger.info("LoaderManager shutting down...")
-
-        # 1. Set Flag
+        self._is_shutting_down = True
         with QMutexLocker(self.mutex):
-            self._is_shutting_down = True
             self.queue.clear()
             self.pending_jobs.clear()
-
-        # 2. Wake up all workers so they see the flag
         self.semaphore.release(NUM_WORKERS * 2)
-
-        # 3. Wait for threads
-        logger.info("Waiting for thread pool to clear...")
-        is_cleared = self.thread_pool.waitForDone(2000)
-
-        if not is_cleared:
-            logger.warning("Thread pool did not clear instantly (likely harmless during exit).")
-
-        logger.info("LoaderManager shut down complete.")
+        self.thread_pool.waitForDone(1000)
 
 
-# A single global instance of the loader manager
 loader_manager = LoaderManager()

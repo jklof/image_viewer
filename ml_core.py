@@ -23,7 +23,7 @@ class ImageEmbedder:
 
         model_kwargs = {}
         if self.device == "cuda":
-            model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["dtype"] = torch.float16
 
         logger.info(f"Loading model '{model_id}'...")
         self.model = CLIPModel.from_pretrained(model_id, **model_kwargs).to(self.device)
