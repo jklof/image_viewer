@@ -217,9 +217,10 @@ class ImageDatabase:
         self._load_embeddings_into_memory()
 
     def _get_db_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
     def _create_tables(self):
