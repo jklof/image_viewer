@@ -61,8 +61,10 @@ class SearchResultDelegate(QStyledItemDelegate):
         self.score_pen = QPen(QColor("#55aaff"))
         self.text_pen_color = QColor(220, 220, 220)  # Cache color, apply to painter directly
 
+        # --- Cache all brushes to avoid creating them in paint() ---
         self.bg_brush_normal = QBrush(QColor(40, 40, 40))
         self.bg_brush_hover = QBrush(QColor(85, 170, 255, 60))
+        self.bg_brush_selected = QBrush(QColor(85, 170, 255, 120))  # New cached selection brush
 
         # Cache size hint
         self._size_hint = QSize(ITEM_WIDTH, ITEM_HEIGHT)
@@ -90,7 +92,7 @@ class SearchResultDelegate(QStyledItemDelegate):
         # --- OPTIMIZATION 2: Fast Background Drawing ---
         # Avoid creating QColor/QBrush here. Use pre-allocated brushes.
         if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(item_rect, option.palette.highlight())
+            painter.fillRect(item_rect, self.bg_brush_selected)
         elif option.state & QStyle.StateFlag.State_MouseOver:
             painter.fillRect(item_rect, self.bg_brush_hover)
         else:
