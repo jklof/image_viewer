@@ -234,3 +234,13 @@ class BackendWorker:
             self.job_queue.put(("shutdown", None), block=False)
         except (queue.Full, Exception):
             pass
+
+        # Release GPU memory by unloading the embedder
+        if self.embedder is not None:
+            self.embedder.unload()
+            self.embedder = None
+
+        # Close database connections and free memory
+        if self.db is not None:
+            self.db.close()
+            self.db = None

@@ -89,13 +89,6 @@ def handle_search_text(db: ImageDatabase, args: argparse.Namespace):
 
 def main():
     """Main function to set up parser and handle command dispatch."""
-
-    # --- CRITICAL: Set start method to 'spawn' ---
-    # PyTorch + Multiprocessing on Linux defaults to 'fork', which is unsafe
-    # when CUDA or OpenMP libraries are initialized. We must force 'spawn'.
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
-
     parser = argparse.ArgumentParser(
         description="An AI-powered command-line image management tool.",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -168,4 +161,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # --- CRITICAL: Set start method to 'spawn' ---
+    # PyTorch + Multiprocessing on Linux defaults to 'fork', which is unsafe
+    # when CUDA or OpenMP libraries are initialized. We must force 'spawn'.
+    # This must be inside __main__ to avoid RuntimeError when imported by other scripts.
+    if multiprocessing.get_start_method(allow_none=True) != "spawn":
+        multiprocessing.set_start_method("spawn", force=True)
+
     main()

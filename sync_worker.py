@@ -5,14 +5,19 @@ from image_db import ImageDatabase
 from ml_core import ImageEmbedder
 from config_utils import get_scan_directories, get_db_path, get_model_id
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ml_core import ImageEmbedder
+
 logger = logging.getLogger(__name__)
 
 
 class SyncWorker(QObject):
     """
     A worker that runs the database synchronization in a separate thread.
-    It creates its own instances of the embedder and database to ensure
-    thread safety and isolation from the main application's backend.
+    Can use a shared embedder to avoid CUDA OOM issues, or create its own
+    if no shared embedder is provided.
     """
 
     status_update = Signal(str)
@@ -20,12 +25,14 @@ class SyncWorker(QObject):
     finished = Signal(str, str)  # result_string, message
     error = Signal(str)
 
-    def __init__(self, use_cpu_only: bool):
+    def __init__(self, use_cpu_only: bool, shared_embedder: "ImageEmbedder" = None):
         super().__init__()
         self.use_cpu_only = use_cpu_only
+        self.shared_embedder = shared_embedder
         self.db = None
         self.embedder = None
         self._is_cancelled = False
+        self._owns_embedder = False
 
     @Slot()
     def run(self):
@@ -40,8 +47,17 @@ class SyncWorker(QObject):
             db_path = get_db_path()
             model_id = get_model_id()
 
-            self.status_update.emit(f"Loading model '{model_id}'...")
-            self.embedder = ImageEmbedder(model_id=model_id, use_cpu_only=self.use_cpu_only)
+            # Use shared embedder if provided, otherwise create our own
+            if self.shared_embedder is not None:
+                logger.info("Using shared embedder to avoid CUDA OOM.")
+                self.embedder = self.shared_embedder
+                self._owns_embedder = False
+                self.status_update.emit("Using shared model...")
+            else:
+                self.status_update.emit(f"Loading model '{model_id}'...")
+                self.embedder = ImageEmbedder(model_id=model_id, use_cpu_only=self.use_cpu_only)
+                self._owns_embedder = True
+
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
 
             if self._is_cancelled:
@@ -61,7 +77,7 @@ class SyncWorker(QObject):
 
             result, message = "success", "Synchronization complete."
 
-        except self.db.InterruptedError:
+        except self.db.InterruptedError if self.db else Exception:
             result, message = "cancelled", "Synchronization cancelled."
         except Exception as e:
             logger.error("--- AN ERROR OCCURRED DURING SYNC ---")
@@ -88,7 +104,14 @@ class SyncWorker(QObject):
 
     def cleanup(self):
         """Closes database connections and cleans up resources."""
-        # The ImageDatabase object no longer needs to be explicitly closed.
-        self.db = None
+        # Close database properly
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+
+        # Only unload embedder if we own it (not shared)
+        if self._owns_embedder and self.embedder is not None:
+            self.embedder.unload()
+        
         self.embedder = None
         logger.info("SyncWorker cleaned up resources.")

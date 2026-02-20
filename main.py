@@ -18,9 +18,8 @@ def main():
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU usage.")
     args = parser.parse_args()
 
-    # --- CRITICAL: Set the start method to 'spawn' for CUDA safety ---
-    if multiprocessing.get_start_method(allow_none=True) != "spawn":
-        multiprocessing.set_start_method("spawn", force=True)
+    # Note: multiprocessing start method is set inside __main__ block below
+    # to avoid RuntimeError when this module is imported by other scripts.
 
     app = QApplication(sys.argv)
     try:
@@ -45,4 +44,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # --- CRITICAL: Set the start method to 'spawn' for CUDA safety ---
+    # This must be inside __main__ to avoid RuntimeError when imported by other scripts.
+    if multiprocessing.get_start_method(allow_none=True) != "spawn":
+        multiprocessing.set_start_method("spawn", force=True)
+
     main()

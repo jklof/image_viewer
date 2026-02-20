@@ -6,6 +6,8 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PySide6.QtGui import QPixmap, QCursor
 from PySide6.QtCore import Qt, Signal, Slot, QPoint, QTimer
 
+from loader_manager import loader_manager, thumbnail_cache
+
 # Ensure PySide6 compatibility
 pg.setConfigOption("leftButtonPan", False)  # Use right-click for pan, left for selecting/hover
 
@@ -13,6 +15,7 @@ pg.setConfigOption("leftButtonPan", False)  # Use right-click for pan, left for 
 class QtImageTooltip(QFrame):
     """
     A custom frameless widget to act as a fast, persistent image tooltip.
+    Uses the async thumbnail cache instead of blocking QPixmap loads.
     """
 
     def __init__(self, parent=None):
@@ -38,25 +41,49 @@ class QtImageTooltip(QFrame):
         )
 
         layout.addWidget(self.image_label)
+        self._current_filepath = None
 
     @Slot(str, QPoint)
     def show_image(self, filepath: str, global_pos: QPoint):
-        pixmap = QPixmap(filepath)
-        if pixmap.isNull():
+        """Show image from cache. Does NOT block on file I/O."""
+        self._current_filepath = filepath
+        
+        # Check cache first (non-blocking)
+        cached = thumbnail_cache.get(filepath)
+        if cached:
+            scaled_pixmap = cached.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+            # Position the tooltip slightly offset from the mouse
+            self.move(global_pos + QPoint(20, 20))
+            self.setVisible(True)
+        else:
+            # Request async load - tooltip will be updated via update_from_cache
+            loader_manager.request_thumbnail(filepath)
+            # Show loading placeholder
+            self.image_label.setText("Loading...")
+            self.move(global_pos + QPoint(20, 20))
+            self.setVisible(True)
+
+    def update_from_cache(self, filepath: str):
+        """Update tooltip when thumbnail is loaded asynchronously."""
+        if filepath != self._current_filepath:
             return
-
-        scaled_pixmap = pixmap.scaled(
-            self.image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setPixmap(scaled_pixmap)
-
-        # Position the tooltip slightly offset from the mouse
-        self.move(global_pos + QPoint(20, 20))
-        self.setVisible(True)
+        
+        cached = thumbnail_cache.get(filepath)
+        if cached:
+            scaled_pixmap = cached.scaled(
+                self.image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.image_label.setPixmap(scaled_pixmap)
 
     def hide_tooltip(self):
+        self._current_filepath = None
         self.setVisible(False)
 
 
@@ -108,6 +135,9 @@ class QtVisualizer(QWidget):
         self.hover_timer.timeout.connect(self._show_tooltip_from_timer)
 
         self._pending_hover_data = None  # Store data temporarily
+
+        # Connect to async thumbnail loading
+        loader_manager.thumbnail_loaded.connect(self._on_thumbnail_loaded)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -171,6 +201,12 @@ class QtVisualizer(QWidget):
             self.tooltip.hide_tooltip()
             # --- EMIT a simple signal; let the main window decide what to do ---
             self.image_selected.emit(filepath)
+
+    @Slot(str)
+    def _on_thumbnail_loaded(self, filepath: str):
+        """Update tooltip when thumbnail is loaded asynchronously."""
+        if self._is_active:
+            self.tooltip.update_from_cache(filepath)
 
     @Slot(list)
     def load_plot_data(self, plot_data: list):

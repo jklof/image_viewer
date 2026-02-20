@@ -1,5 +1,6 @@
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot, QMimeData, QUrl
 import logging
+import collections
 
 from constants import FILEPATH_ROLE, SCORE_ROLE
 from loader_manager import loader_manager, thumbnail_cache
@@ -18,7 +19,8 @@ class ImageResultModel(QAbstractListModel):
         self.results_data = []
         # Pre-allocate one placeholder
         self.placeholder_pixmap = create_placeholder_pixmap()
-        self._filepath_to_row_map = {}
+        # Map filepath to list of row indices (handles duplicate filepaths)
+        self._filepath_to_row_map = collections.defaultdict(list)
         loader_manager.thumbnail_loaded.connect(self.on_thumbnail_ready)
 
     def rowCount(self, parent=QModelIndex()):
@@ -75,19 +77,24 @@ class ImageResultModel(QAbstractListModel):
 
     @Slot(str)
     def on_thumbnail_ready(self, filepath: str):
-        row = self._filepath_to_row_map.get(filepath)
-        if row is not None:
-            index = self.createIndex(row, 0)
-            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
+        rows = self._filepath_to_row_map.get(filepath)
+        if rows:
+            # Emit dataChanged for all rows with this filepath
+            for row in rows:
+                index = self.createIndex(row, 0)
+                self.dataChanged.emit(index, index, [Qt.ItemDataRole.DecorationRole])
 
     def set_results(self, results: list):
         self.beginResetModel()
         self.results_data = results
-        self._filepath_to_row_map = {filepath: i for i, (_, filepath) in enumerate(results)}
+        # Map filepath to list of row indices to handle duplicate filepaths
+        self._filepath_to_row_map = collections.defaultdict(list)
+        for i, (_, filepath) in enumerate(results):
+            self._filepath_to_row_map[filepath].append(i)
         self.endResetModel()
 
     def clear(self):
         self.beginResetModel()
         self.results_data = []
-        self._filepath_to_row_map = {}
+        self._filepath_to_row_map = collections.defaultdict(list)
         self.endResetModel()

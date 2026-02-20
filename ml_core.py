@@ -11,6 +11,12 @@ class ImageEmbedder:
     """
 
     def __init__(self, model_id: str, use_cpu_only: bool = False):
+        self.model = None
+        self.processor = None
+        self.device = None
+        self.model_id = None
+        self.embedding_shape = None
+        self.embedding_dtype = np.float32
         logger.info("Importing ML libraries...")
         import torch
         from transformers import CLIPModel, CLIPProcessor
@@ -68,3 +74,23 @@ class ImageEmbedder:
                 features = features / features.norm(dim=-1, keepdim=True)
                 all_embeddings.extend(features.cpu().numpy().astype(self.embedding_dtype))
             return all_embeddings
+
+    def unload(self):
+        """
+        Release model resources and free GPU memory.
+        Call this before destroying the embedder or when switching models.
+        """
+        import torch
+
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.processor is not None:
+            del self.processor
+            self.processor = None
+
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+            logger.info("GPU cache cleared.")
+
+        logger.info("ImageEmbedder unloaded.")

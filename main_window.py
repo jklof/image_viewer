@@ -557,6 +557,9 @@ class MainWindow(QMainWindow):
         self.results_model.set_results(results)
         if results:
             self.results_view.scrollToTop()
+        else:
+            # If results are empty, ensure we're not stuck in single view
+            self.content_stack.setCurrentWidget(self.results_view)
         self.current_single_view_index = -1
         self._update_toggle_view_button_state()
 

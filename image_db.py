@@ -456,21 +456,24 @@ class ImageDatabase:
 
             # Pass 1: Train PCA on the data stream without loading all to RAM
             conn = self._get_db_connection()
-            cursor = conn.execute("SELECT embedding FROM embeddings")
+            try:
+                cursor = conn.execute("SELECT embedding FROM embeddings")
+                try:
+                    while True:
+                        if check_cancelled_callback:
+                            check_cancelled_callback()
 
-            while True:
-                if check_cancelled_callback:
-                    check_cancelled_callback()
+                        rows = cursor.fetchmany(batch_size)
+                        if not rows:
+                            break
 
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
-
-                # Convert bytes to numpy batch
-                batch = np.vstack([self._reconstruct_embedding(r[0]).flatten() for r in rows])
-                ipca.partial_fit(batch)
-
-            cursor.close()
+                        # Convert bytes to numpy batch
+                        batch = np.vstack([self._reconstruct_embedding(r[0]).flatten() for r in rows])
+                        ipca.partial_fit(batch)
+                finally:
+                    cursor.close()
+            finally:
+                conn.close()
 
             # --- STEP 2: TRANSFORM & LOAD COMPRESSED DATA ---
             # Now we load the data, but it's only 50 floats per image instead of 768.
@@ -482,26 +485,30 @@ class ImageDatabase:
             compressed_data = []
             all_shas = []
 
-            cursor = conn.execute("SELECT sha256, embedding FROM embeddings")
-            while True:
-                if check_cancelled_callback:
-                    check_cancelled_callback()
+            conn = self._get_db_connection()
+            try:
+                cursor = conn.execute("SELECT sha256, embedding FROM embeddings")
+                try:
+                    while True:
+                        if check_cancelled_callback:
+                            check_cancelled_callback()
 
-                rows = cursor.fetchmany(batch_size)
-                if not rows:
-                    break
+                        rows = cursor.fetchmany(batch_size)
+                        if not rows:
+                            break
 
-                shas = [r[0] for r in rows]
-                batch = np.vstack([self._reconstruct_embedding(r[1]).flatten() for r in rows])
+                        shas = [r[0] for r in rows]
+                        batch = np.vstack([self._reconstruct_embedding(r[1]).flatten() for r in rows])
 
-                # Transform to 50 dims immediately
-                batch_reduced = ipca.transform(batch)
+                        # Transform to 50 dims immediately
+                        batch_reduced = ipca.transform(batch)
 
-                all_shas.extend(shas)
-                compressed_data.append(batch_reduced)
-
-            cursor.close()
-            conn.close()
+                        all_shas.extend(shas)
+                        compressed_data.append(batch_reduced)
+                finally:
+                    cursor.close()
+            finally:
+                conn.close()
 
             # Consolidate into one array (Approx 12MB for 60k images)
             X_reduced = np.vstack(compressed_data)
@@ -622,3 +629,15 @@ class ImageDatabase:
             return conn.execute(
                 "SELECT v.coord_x, v.coord_y, v.cluster_id, f.filepath FROM visualization v JOIN (SELECT sha256, MIN(filepath) as filepath FROM filepaths GROUP BY sha256) f ON v.sha256 = f.sha256"
             ).fetchall()
+
+    def close(self):
+        """
+        Clean up database resources.
+        Releases the in-memory embedding matrix and clears caches.
+        """
+        logger.info("Closing ImageDatabase and freeing resources...")
+        self._embedding_matrix = None
+        self._shas_in_order = []
+        self._sha_to_path_map_cache = None
+        self._cancel_flag.set()
+        logger.info("ImageDatabase closed.")
