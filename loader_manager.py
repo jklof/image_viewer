@@ -9,45 +9,42 @@ from PySide6.QtCore import (
     QThreadPool,
     Signal,
     Slot,
-    QSemaphore,
-    QSize,
+    QThread,
 )
-from PySide6.QtGui import QPixmap, QImage, QColor, QImageReader
+from PySide6.QtGui import QPixmap, QImage, QColor
 from ui_components import THUMBNAIL_SIZE
 
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
-# Cap at 4 to prevent SSD I/O saturation and GUI thread starvation on high-core CPUs
-NUM_WORKERS = 4
+# High worker count is safe here; Condition variables prevent CPU busy loops
+NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
 MAX_PENDING_JOBS = 100
 
 
 class ThumbnailCache:
-    """A thread-safe cache optimized for LOCKLESS reads."""
+    """Thread-safe LRU cache using Python's native threading.Lock."""
 
     def __init__(self, size):
-        self.cache = {}
-        self.queue = collections.deque()
+        self.cache = collections.OrderedDict()
         self.size = size
         self.lock = threading.Lock()
 
     def get(self, key):
-        # FAST PATH: Dictionary `.get()` is atomic in Python (GIL protected).
-        # No lock required! This prevents UI stuttering during rapid scrolling.
-        # We sacrifice strict LRU access-updates for massive speed gains.
-        return self.cache.get(key)
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+        return None
 
     def put(self, key, value):
         with self.lock:
             if key in self.cache:
-                return
+                self.cache.move_to_end(key)
             self.cache[key] = value
-            self.queue.append(key)
             if len(self.cache) > self.size:
-                oldest = self.queue.popleft()
-                self.cache.pop(oldest, None)
+                self.cache.popitem(last=False)
 
 
 thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
@@ -67,28 +64,16 @@ class PersistentWorker(QRunnable):
                     continue
 
                 try:
+                    # 1. Fast path cache check
                     if thumbnail_cache.get(filepath):
                         continue
 
-                    reader = QImageReader(filepath)
-                    reader.setAutoTransform(True)
-
-                    if not reader.canRead():
-                        self.manager._internal_worker_result.emit(filepath, QImage())
-                        continue
-
-                    # Pre-scale to save RAM during decode
-                    original_size = reader.size()
-                    rough_target = THUMBNAIL_SIZE * 3
-                    if original_size.width() > rough_target or original_size.height() > rough_target:
-                        scaled_size = original_size.scaled(
-                            rough_target, rough_target, Qt.AspectRatioMode.KeepAspectRatio
-                        )
-                        reader.setScaledSize(scaled_size)
-
-                    image = reader.read()
+                    # 2. Reverted to QImage: It is significantly faster for
+                    # rapid I/O decoding than QImageReader on most systems.
+                    image = QImage(filepath)
 
                     if not image.isNull():
+                        # 3. Scale on the background thread
                         if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
                             image = image.scaled(
                                 THUMBNAIL_SIZE,
@@ -97,8 +82,6 @@ class PersistentWorker(QRunnable):
                                 Qt.TransformationMode.SmoothTransformation,
                             )
 
-                        # Convert to GPU-optimal format on the worker thread
-                        image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
                         self.manager._internal_worker_result.emit(filepath, image)
                     else:
                         self.manager._internal_worker_result.emit(filepath, QImage())
@@ -120,10 +103,12 @@ class LoaderManager(QObject):
         self.thread_pool.setMaxThreadCount(NUM_WORKERS)
         self._is_shutting_down = False
 
+        # --- ROCK SOLID SYNCHRONIZATION ---
+        # Replacing the fragile Semaphore with a Condition variable.
         self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
         self.queue = collections.deque()
         self.pending_jobs = set()
-        self.semaphore = QSemaphore(0)
 
         self._internal_worker_result.connect(self._on_worker_result_ready)
 
@@ -139,46 +124,38 @@ class LoaderManager(QObject):
     def request_thumbnail(self, filepath: str):
         if self._is_shutting_down:
             return
-
-        # LOCKLESS FAST-PATHS: Checking sets/dicts is atomic in Python.
-        if filepath in self.pending_jobs:
-            return
-        if filepath in thumbnail_cache.cache:
+        if thumbnail_cache.get(filepath):
             return
 
-        with self.lock:
-            # Re-check inside lock
+        with self.condition:
             if filepath in self.pending_jobs:
                 return
 
-            added_to_semaphore = False
-
-            if len(self.queue) < MAX_PENDING_JOBS:
-                added_to_semaphore = True
-            else:
+            # Enforce max size (LIFO drop oldest job from the right)
+            while len(self.queue) >= MAX_PENDING_JOBS:
                 try:
                     discarded = self.queue.pop()
                     self.pending_jobs.discard(discarded)
                 except IndexError:
-                    pass
+                    break
 
             self.pending_jobs.add(filepath)
-            self.queue.appendleft(filepath)
+            self.queue.appendleft(filepath)  # Add newest to the left
 
-        if added_to_semaphore:
-            self.semaphore.release(1)
+            # Wake up exactly one sleeping worker
+            self.condition.notify()
 
     def get_next_job(self) -> str | None:
-        if not self.semaphore.tryAcquire(1, 50):
-            return None
+        with self.condition:
+            # Sleep perfectly without spinning the CPU while the queue is empty
+            while len(self.queue) == 0 and not self._is_shutting_down:
+                self.condition.wait(0.5)
 
-        with self.lock:
-            if self._is_shutting_down:
+            if self._is_shutting_down or len(self.queue) == 0:
                 return None
-            try:
-                return self.queue.popleft()
-            except IndexError:
-                return None
+
+            # Return newest job
+            return self.queue.popleft()
 
     @Slot(str, QImage)
     def _on_worker_result_ready(self, filepath: str, image: QImage):
@@ -200,11 +177,11 @@ class LoaderManager(QObject):
 
     def shutdown(self):
         self._is_shutting_down = True
-        with self.lock:
+        with self.condition:
             self.queue.clear()
             self.pending_jobs.clear()
-        self.semaphore.release(NUM_WORKERS * 2)
-        self.thread_pool.waitForDone(1000)
+            self.condition.notify_all()  # Wake all threads so they exit cleanly
+        self.thread_pool.waitForDone(1500)
 
 
 loader_manager = LoaderManager()

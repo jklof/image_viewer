@@ -23,6 +23,7 @@ class SmoothListView(QListView):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._finalize_resize)
 
+        # Optimize for grid scrolling
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.setUniformItemSizes(True)
 
@@ -53,6 +54,7 @@ class SearchResultDelegate(QStyledItemDelegate):
         self.score_pen = QPen(QColor("#55aaff"))
         self.text_pen_color = QColor(220, 220, 220)
 
+        # Pre-allocate brushes to stop memory allocations during scrolling
         self.bg_brush_normal = QBrush(QColor(40, 40, 40))
         self.bg_brush_hover = QBrush(QColor(85, 170, 255, 60))
         self.bg_brush_selected = QBrush(QColor(85, 170, 255, 120))
@@ -63,9 +65,6 @@ class SearchResultDelegate(QStyledItemDelegate):
         self._score_height = 15
         self._text_height = 20
         self._padding = 5
-
-        # --- NEW: Cache calculated strings to prevent expensive font metrics loops ---
-        self._elided_text_cache = {}
 
     def sizeHint(self, option, index):
         return self._size_hint
@@ -78,6 +77,7 @@ class SearchResultDelegate(QStyledItemDelegate):
         painter.setClipRect(option.rect)
         item_rect = option.rect
 
+        # Use pre-allocated brushes
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(item_rect, self.bg_brush_selected)
         elif option.state & QStyle.StateFlag.State_MouseOver:
@@ -99,6 +99,7 @@ class SearchResultDelegate(QStyledItemDelegate):
         if isinstance(score, float) and score > 0:
             painter.setFont(self.score_font)
             painter.setPen(self.score_pen)
+
             score_rect = QRect(
                 item_rect.left(),
                 item_rect.y() + self._thumbnail_top_margin + THUMBNAIL_SIZE + 5,
@@ -109,29 +110,19 @@ class SearchResultDelegate(QStyledItemDelegate):
 
         filepath = index.data(FILEPATH_ROLE)
         if filepath:
-            filename_rect_width = item_rect.width() - (self._padding * 2)
-
-            # --- FASTER: Check dictionary before doing Qt String Math ---
-            if filepath not in self._elided_text_cache:
-                filename = os.path.basename(filepath)
-                fm = painter.fontMetrics()
-                elided_text = fm.elidedText(filename, Qt.TextElideMode.ElideRight, filename_rect_width)
-
-                # Prevent dict from infinitely growing over long sessions
-                if len(self._elided_text_cache) > 5000:
-                    self._elided_text_cache.clear()
-
-                self._elided_text_cache[filepath] = elided_text
-
+            filename = os.path.basename(filepath)
             painter.setFont(self.filename_font)
             painter.setPen(self.text_pen_color)
 
             filename_rect = QRect(
                 item_rect.left() + self._padding,
                 item_rect.bottom() - self._text_height,
-                filename_rect_width,
+                item_rect.width() - (self._padding * 2),
                 self._text_height,
             )
-            painter.drawText(filename_rect, Qt.AlignmentFlag.AlignCenter, self._elided_text_cache[filepath])
+
+            fm = painter.fontMetrics()
+            elided_text = fm.elidedText(filename, Qt.TextElideMode.ElideRight, filename_rect.width())
+            painter.drawText(filename_rect, Qt.AlignmentFlag.AlignCenter, elided_text)
 
         painter.restore()
