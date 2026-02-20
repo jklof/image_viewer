@@ -10,7 +10,6 @@ from PySide6.QtCore import (
     Signal,
     Slot,
     QSemaphore,
-    QThread,
     QSize,
 )
 from PySide6.QtGui import QPixmap, QImage, QColor, QImageReader
@@ -20,32 +19,35 @@ logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
 THUMBNAIL_CACHE_SIZE = 2000
-NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
+# Cap at 4 to prevent SSD I/O saturation and GUI thread starvation on high-core CPUs
+NUM_WORKERS = 4
 MAX_PENDING_JOBS = 100
 
 
 class ThumbnailCache:
-    """Thread-safe LRU cache using Python's native threading.Lock."""
+    """A thread-safe cache optimized for LOCKLESS reads."""
 
     def __init__(self, size):
-        self.cache = collections.OrderedDict()
+        self.cache = {}
+        self.queue = collections.deque()
         self.size = size
         self.lock = threading.Lock()
 
     def get(self, key):
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-        return None
+        # FAST PATH: Dictionary `.get()` is atomic in Python (GIL protected).
+        # No lock required! This prevents UI stuttering during rapid scrolling.
+        # We sacrifice strict LRU access-updates for massive speed gains.
+        return self.cache.get(key)
 
     def put(self, key, value):
         with self.lock:
             if key in self.cache:
-                self.cache.move_to_end(key)
+                return
             self.cache[key] = value
+            self.queue.append(key)
             if len(self.cache) > self.size:
-                self.cache.popitem(last=False)
+                oldest = self.queue.popleft()
+                self.cache.pop(oldest, None)
 
 
 thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
@@ -65,19 +67,17 @@ class PersistentWorker(QRunnable):
                     continue
 
                 try:
-                    # 1. Check cache (Fast path)
                     if thumbnail_cache.get(filepath):
                         continue
 
-                    # 2. QImageReader for efficient decoding
                     reader = QImageReader(filepath)
-                    reader.setAutoTransform(True)  # Fix EXIF rotation issues
+                    reader.setAutoTransform(True)
 
                     if not reader.canRead():
                         self.manager._internal_worker_result.emit(filepath, QImage())
                         continue
 
-                    # 3. Rough scale down on load to save RAM (e.g. 3x thumbnail size)
+                    # Pre-scale to save RAM during decode
                     original_size = reader.size()
                     rough_target = THUMBNAIL_SIZE * 3
                     if original_size.width() > rough_target or original_size.height() > rough_target:
@@ -89,7 +89,6 @@ class PersistentWorker(QRunnable):
                     image = reader.read()
 
                     if not image.isNull():
-                        # 4. High-quality smooth scaling
                         if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
                             image = image.scaled(
                                 THUMBNAIL_SIZE,
@@ -98,10 +97,8 @@ class PersistentWorker(QRunnable):
                                 Qt.TransformationMode.SmoothTransformation,
                             )
 
-                        # 5. VERY IMPORTANT: Convert to optimal GPU format on the worker thread.
-                        # This prevents the Main UI Thread from stuttering during QPixmap creation.
+                        # Convert to GPU-optimal format on the worker thread
                         image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-
                         self.manager._internal_worker_result.emit(filepath, image)
                     else:
                         self.manager._internal_worker_result.emit(filepath, QImage())
@@ -142,10 +139,15 @@ class LoaderManager(QObject):
     def request_thumbnail(self, filepath: str):
         if self._is_shutting_down:
             return
-        if thumbnail_cache.get(filepath):
+
+        # LOCKLESS FAST-PATHS: Checking sets/dicts is atomic in Python.
+        if filepath in self.pending_jobs:
+            return
+        if filepath in thumbnail_cache.cache:
             return
 
         with self.lock:
+            # Re-check inside lock
             if filepath in self.pending_jobs:
                 return
 
@@ -154,7 +156,6 @@ class LoaderManager(QObject):
             if len(self.queue) < MAX_PENDING_JOBS:
                 added_to_semaphore = True
             else:
-                # Discard oldest without increasing total queue count
                 try:
                     discarded = self.queue.pop()
                     self.pending_jobs.discard(discarded)
@@ -164,8 +165,6 @@ class LoaderManager(QObject):
             self.pending_jobs.add(filepath)
             self.queue.appendleft(filepath)
 
-        # CRITICAL FIX: Only release the semaphore if the queue ACTUALLY grew.
-        # This prevents 100% CPU busy loops when rapidly scrolling.
         if added_to_semaphore:
             self.semaphore.release(1)
 
@@ -190,7 +189,6 @@ class LoaderManager(QObject):
             self.pending_jobs.discard(filepath)
 
         if not image.isNull():
-            # This is now instantaneous because of ARGB32_Premultiplied format
             pixmap = QPixmap.fromImage(image)
             thumbnail_cache.put(filepath, pixmap)
             self.thumbnail_loaded.emit(filepath)
