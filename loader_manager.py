@@ -24,27 +24,32 @@ MAX_PENDING_JOBS = 100
 
 
 class ThumbnailCache:
-    """Thread-safe LRU cache using Python's native threading.Lock."""
+    """Thread-safe cache optimized for LOCKLESS reads on the UI Thread."""
 
     def __init__(self, size):
-        self.cache = collections.OrderedDict()
+        self.cache = {}
+        self.cleanup_queue = collections.deque()
         self.size = size
         self.lock = threading.Lock()
 
     def get(self, key):
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-        return None
+        # FAST PATH: Dictionary `.get()` is atomic in Python.
+        # No lock required! The UI Thread never waits for background workers here.
+        return self.cache.get(key)
 
     def put(self, key, value):
         with self.lock:
             if key in self.cache:
-                self.cache.move_to_end(key)
+                return
+
             self.cache[key] = value
+            self.cleanup_queue.append(key)
+
+            # Simple FIFO cleanup is perfectly fine for thumbnails
+            # and avoids mutating the dictionary on reads.
             if len(self.cache) > self.size:
-                self.cache.popitem(last=False)
+                oldest_key = self.cleanup_queue.popleft()
+                self.cache.pop(oldest_key, None)
 
 
 thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
@@ -81,6 +86,10 @@ class PersistentWorker(QRunnable):
                                 Qt.AspectRatioMode.KeepAspectRatio,
                                 Qt.TransformationMode.SmoothTransformation,
                             )
+
+                        # 4. Convert to optimal GPU texture format on the background thread!
+                        # This turns QPixmap.fromImage() on the Main Thread into an instant O(1) memory copy.
+                        image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
                         self.manager._internal_worker_result.emit(filepath, image)
                     else:
