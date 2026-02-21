@@ -261,7 +261,7 @@ class OpenCVVideoPlayer(QWidget):
             self.video_controls.hide()
             pixmap = QPixmap(current_path)
             if not pixmap.isNull():
-                self._display_pixmap(pixmap)
+                self._display_pixmap(pixmap, is_video=False)
             else:
                 self.video_label.setText("Could not load image.")
 
@@ -339,21 +339,31 @@ class OpenCVVideoPlayer(QWidget):
 
     def _display_frame(self, frame):
         """Convert OpenCV frame to QPixmap and display it."""
-        self.current_frame = frame.copy()  # Store for extraction
+        self.current_frame = frame.copy()  # Store original BGR for extraction
+        
         # Convert BGR to RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        
+        # .copy() is CRITICAL here so Qt maintains ownership of the memory 
+        # when the Python numpy array is garbage collected!
+        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(q_image)
-        self._display_pixmap(pixmap)
+        
+        # Display as video (FastTransformation for CPU efficiency)
+        self._display_pixmap(pixmap, is_video=True)
 
-    def _display_pixmap(self, pixmap: QPixmap):
+    def _display_pixmap(self, pixmap: QPixmap, is_video: bool = False):
         """Scale and display a pixmap."""
+        # Use FastTransformation for 30/60fps video to prevent CPU overload,
+        # but keep SmoothTransformation for standard static images
+        transform_mode = Qt.TransformationMode.FastTransformation if is_video else Qt.TransformationMode.SmoothTransformation
+        
         scaled = pixmap.scaled(
             self.video_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            transform_mode
         )
         self.video_label.setPixmap(scaled)
 
@@ -379,14 +389,11 @@ class OpenCVVideoPlayer(QWidget):
         self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
         self.current_frame_idx = target_frame
         
-        # Read and display the frame
+        # Read and display the frame (this naturally advances the OpenCV read pointer)
         ret, frame = self.video_capture.read()
         if ret:
             self._display_frame(frame)
-            # Reset position back one frame so next read gets this frame
-            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-            self.current_frame_idx = target_frame
-
+            
         if was_playing:
             self._start_playback()
 
@@ -395,25 +402,25 @@ class OpenCVVideoPlayer(QWidget):
         if self.video_capture is None:
             return
 
-        was_playing = self.is_playing
-        if was_playing:
+        if self.is_playing:
             self._stop_playback()
 
-        # Calculate new frame position
-        new_frame = self.current_frame_idx + direction
-        new_frame = max(0, min(new_frame, self.total_frames - 1))
-
-        # Seek to new position
-        self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, new_frame)
-        self.current_frame_idx = new_frame
-        
-        # Read and display
-        ret, frame = self.video_capture.read()
-        if ret:
-            self._display_frame(frame)
-            # Reset back one frame so next read advances properly
+        if direction == 1:
+            # FAST PATH: Stepping forward is instant, just read the next frame
+            ret, frame = self.video_capture.read()
+            if ret:
+                self.current_frame_idx += 1
+                self._display_frame(frame)
+                self._update_slider()
+        else:
+            # SLOW PATH: Stepping backwards requires a heavy seek operation
+            new_frame = max(0, self.current_frame_idx - 1)
             self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, new_frame)
             self.current_frame_idx = new_frame
+            ret, frame = self.video_capture.read()
+            if ret:
+                self._display_frame(frame)
+                self._update_slider()
 
     def _extract_current_frame(self):
         """Save the current video frame as a PNG file."""
@@ -430,6 +437,7 @@ class OpenCVVideoPlayer(QWidget):
         if filepath:
             if not filepath.lower().endswith(".png"):
                 filepath += ".png"
+            # OpenCV writes using the native BGR frame we stored
             cv2.imwrite(filepath, self.current_frame)
             logger.info(f"Saved frame to: {filepath}")
 
@@ -438,7 +446,7 @@ class OpenCVVideoPlayer(QWidget):
         if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
             pixmap = QPixmap(self.current_filepath)
             if not pixmap.isNull():
-                self._display_pixmap(pixmap)
+                self._display_pixmap(pixmap, is_video=False)
         elif self.current_frame is not None:
             self._display_frame(self.current_frame)
 
