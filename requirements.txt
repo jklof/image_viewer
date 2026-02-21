@@ -3,6 +3,9 @@ PySide6
 # Optional: for the dark theme in main.py
 pyqtdarktheme
 
+# --- Video Support ---
+opencv-python
+
 # --- ML/Embeddings Core Dependencies ---
 # Transformers and PyTorch are the heaviest dependencies
 torch

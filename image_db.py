@@ -9,6 +9,7 @@ import io  # Required for byte manipulation
 from collections import defaultdict
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -49,12 +50,25 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
         # 2. Pre-processing (Resize in parallel process to save main thread CPU)
         img_bytes = None
         try:
-            # We only attempt to open if it looks like an image
-            if filepath.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                img = Image.open(filepath)
+            ext = filepath.suffix.lower()
+            if ext in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
+                img = None
+                if ext == ".mp4":
+                    # Extract middle frame using OpenCV
+                    cap = cv2.VideoCapture(str(filepath))
+                    if cap.isOpened():
+                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames // 2))
+                        ret, frame = cap.read()
+                        if ret:
+                            # Convert BGR to RGB
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            img = Image.fromarray(frame)
+                    cap.release()
+                else:
+                    img = Image.open(filepath)
 
-                # Fast reject massive images
-                if (img.width * img.height) <= MAX_IMAGE_PIXELS:
+                if img is not None and (img.width * img.height) <= MAX_IMAGE_PIXELS:
                     img = img.convert("RGB")
                     # Resize now. This is CPU intensive, perfect for the worker pool.
                     img.thumbnail(PREPROCESS_TARGET_SIZE, Image.Resampling.LANCZOS)
@@ -319,7 +333,7 @@ class ImageDatabase:
             if status_callback:
                 status_callback(f"Scanning {directory}...")
             for p in path_obj.rglob("*"):
-                if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
                     try:
                         disk_files[str(p.absolute())] = p.stat().st_mtime
                     except OSError:

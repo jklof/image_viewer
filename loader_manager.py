@@ -2,6 +2,9 @@ import collections
 import logging
 import threading
 
+import cv2
+import numpy as np
+
 from PySide6.QtCore import (
     QObject,
     Qt,
@@ -73,9 +76,30 @@ class PersistentWorker(QRunnable):
                     if thumbnail_cache.get(filepath):
                         continue
 
-                    # 2. Reverted to QImage: It is significantly faster for
-                    # rapid I/O decoding than QImageReader on most systems.
-                    image = QImage(filepath)
+                    # 2. Check file extension for video vs image
+                    ext = filepath.lower()
+                    image = QImage()
+
+                    if ext.endswith(".mp4"):
+                        # Handle video thumbnail using OpenCV
+                        cap = cv2.VideoCapture(filepath)
+                        if cap.isOpened():
+                            # Grab frame at 10% in to avoid black starting frames
+                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
+                            ret, frame = cap.read()
+                            if ret:
+                                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                h, w, ch = frame.shape
+                                bytes_per_line = ch * w
+                                # Create QImage pointing to numpy data, then COPY it so
+                                # we can garbage collect the numpy array safely.
+                                tmp_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                                image = tmp_img.copy()
+                        cap.release()
+                    else:
+                        # Handle regular image files
+                        image = QImage(filepath)
 
                     if not image.isNull():
                         # 3. Scale on the background thread

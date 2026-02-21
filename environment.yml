@@ -17,5 +17,6 @@ dependencies:
   - pillow
   - umap-learn
   - hdbscan
+  - opencv
   - pip:
     - pyqtdarktheme

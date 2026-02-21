@@ -1,7 +1,9 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl, QRect
+import cv2
+
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl, QRect, QTimer
 from PySide6.QtGui import (
     QAction,
     QPixmap,
@@ -17,6 +19,7 @@ from PySide6.QtGui import (
     QPolygon,
     QRegion,
     QIcon,  # Ensure QIcon is imported
+    QImage,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +38,11 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QSplitter,
     QProgressBar,
+    QSlider,
+    QFileDialog,
 )
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from query_builder import UniversalQueryBuilder
 from qt_visualizer import QtVisualizer
@@ -135,8 +142,11 @@ class NavThumbnail(QWidget):
         painter.drawPolygon(QPolygon(points))
 
 
-class SingleImageViewer(QWidget):
-    # ... (No changes to SingleImageViewer logic, just including for context) ...
+class OpenCVVideoPlayer(QWidget):
+    """
+    Video player using OpenCV for reliable cross-platform playback.
+    Uses QTimer to drive frame updates.
+    """
     closed = Signal()
     next_requested = Signal()
     prev_requested = Signal()
@@ -145,69 +155,292 @@ class SingleImageViewer(QWidget):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.current_filepath = None
+        self.video_capture = None
+        self.video_fps = 30.0
+        self.total_frames = 0
+        self.current_frame_idx = 0
+        self.is_playing = False
+        self.current_frame = None  # Store current frame for extraction
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 0, 10, 0)
         main_layout.setSpacing(10)
 
+        # Prev Button
         prev_container_layout = QVBoxLayout()
         prev_container_layout.addStretch(1)
         self.prev_btn = NavThumbnail("prev", self)
         self.prev_btn.clicked.connect(self.prev_requested.emit)
         prev_container_layout.addWidget(self.prev_btn)
         prev_container_layout.addStretch(1)
-
         main_layout.addLayout(prev_container_layout)
 
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.image_label.setMinimumSize(200, 200)
-        self.image_label.setAcceptDrops(False)
+        # Center Container
+        center_layout = QVBoxLayout()
 
-        main_layout.addWidget(self.image_label, 1)
+        # --- Video/Image Display ---
+        self.video_label = QLabel()
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.video_label.setMinimumSize(200, 200)
+        self.video_label.setStyleSheet("background-color: black;")
+        self.video_label.setAcceptDrops(False)
+        center_layout.addWidget(self.video_label, 1)
 
+        # --- Video Controls UI ---
+        self.video_controls = QWidget()
+        controls_layout = QHBoxLayout(self.video_controls)
+        controls_layout.setContentsMargins(0, 5, 0, 5)
+
+        self.play_btn = QPushButton()
+        self.play_btn.setIcon(icons.create_icon(icons.SVG_PLAY))
+        self.play_btn.setFixedWidth(40)
+        self.play_btn.clicked.connect(self._toggle_play_pause)
+
+        self.step_back_btn = QPushButton()
+        self.step_back_btn.setIcon(icons.create_icon(icons.SVG_STEP_BACK))
+        self.step_back_btn.setFixedWidth(40)
+        self.step_back_btn.clicked.connect(lambda: self._step_frame(-1))
+        self.step_back_btn.setToolTip("Step Backward 1 Frame")
+
+        self.step_fwd_btn = QPushButton()
+        self.step_fwd_btn.setIcon(icons.create_icon(icons.SVG_STEP_FWD))
+        self.step_fwd_btn.setFixedWidth(40)
+        self.step_fwd_btn.clicked.connect(lambda: self._step_frame(1))
+        self.step_fwd_btn.setToolTip("Step Forward 1 Frame")
+
+        self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
+        self.timeline_slider.sliderMoved.connect(self._on_slider_moved)
+        self.timeline_slider.setRange(0, 1000)
+
+        self.extract_btn = QPushButton("Save Frame")
+        self.extract_btn.setIcon(icons.create_icon(icons.SVG_SAVE))
+        self.extract_btn.clicked.connect(self._extract_current_frame)
+
+        controls_layout.addWidget(self.play_btn)
+        controls_layout.addWidget(self.step_back_btn)
+        controls_layout.addWidget(self.step_fwd_btn)
+        controls_layout.addWidget(self.timeline_slider)
+        controls_layout.addWidget(self.extract_btn)
+
+        center_layout.addWidget(self.video_controls)
+        self.video_controls.hide()
+
+        main_layout.addLayout(center_layout, 1)
+
+        # Next Button
         next_container_layout = QVBoxLayout()
         next_container_layout.addStretch(1)
         self.next_btn = NavThumbnail("next", self)
         self.next_btn.clicked.connect(self.next_requested.emit)
         next_container_layout.addWidget(self.next_btn)
         next_container_layout.addStretch(1)
-
         main_layout.addLayout(next_container_layout)
 
-    def set_image_data(self, current_path: str, prev_path: str | None, next_path: str | None):
+        # Timer for video playback
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self._next_frame)
+
+    def set_media_data(self, current_path: str, prev_path: str | None, next_path: str | None):
         self.current_filepath = current_path
         self.prev_btn.set_filepath(prev_path)
         self.next_btn.set_filepath(next_path)
+        
+        # Stop any existing playback
+        self._stop_playback()
 
         if not current_path:
-            self.image_label.setPixmap(QPixmap())
+            self.video_label.setPixmap(QPixmap())
+            self.video_controls.hide()
             return
 
-        pixmap = QPixmap(current_path)
-        if not pixmap.isNull():
-            self._update_scaled_pixmap(pixmap)
+        if current_path.lower().endswith(".mp4"):
+            self.video_controls.show()
+            self._load_video(current_path)
         else:
-            self.image_label.setText("Could not load image.")
+            self.video_controls.hide()
+            pixmap = QPixmap(current_path)
+            if not pixmap.isNull():
+                self._display_pixmap(pixmap)
+            else:
+                self.video_label.setText("Could not load image.")
 
-    def _update_scaled_pixmap(self, pixmap: QPixmap = None):
-        if pixmap is None and self.image_label.pixmap():
-            pixmap = self.image_label.pixmap()
+    def _load_video(self, filepath: str):
+        """Load a video file using OpenCV."""
+        if self.video_capture is not None:
+            self.video_capture.release()
 
-        if pixmap and not pixmap.isNull():
-            scaled_pixmap = pixmap.scaled(
-                self.image_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self.image_label.setPixmap(scaled_pixmap)
+        self.video_capture = cv2.VideoCapture(filepath)
+        if not self.video_capture.isOpened():
+            logger.error(f"Failed to open video: {filepath}")
+            self.video_label.setText("Could not load video.")
+            return
+
+        self.video_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+        if self.video_fps <= 0:
+            self.video_fps = 30.0
+        self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.current_frame_idx = 0
+
+        logger.info(f"Loaded video: {filepath}, FPS: {self.video_fps}, Frames: {self.total_frames}")
+
+        # Display first frame
+        self._read_and_display_frame()
+        
+        # Start playback
+        self._start_playback()
+
+    def _start_playback(self):
+        """Start video playback."""
+        if self.video_capture is None:
+            return
+        self.is_playing = True
+        interval = int(1000.0 / self.video_fps)
+        self.playback_timer.start(interval)
+        self.play_btn.setIcon(icons.create_icon(icons.SVG_PAUSE))
+
+    def _stop_playback(self):
+        """Stop video playback."""
+        self.is_playing = False
+        self.playback_timer.stop()
+        self.play_btn.setIcon(icons.create_icon(icons.SVG_PLAY))
+
+    def _toggle_play_pause(self):
+        """Toggle between play and pause."""
+        if self.is_playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+
+    def _next_frame(self):
+        """Read and display the next frame."""
+        if self.video_capture is None or not self.video_capture.isOpened():
+            self._stop_playback()
+            return
+
+        ret, frame = self.video_capture.read()
+        if ret:
+            self.current_frame_idx += 1
+            self._display_frame(frame)
+            self._update_slider()
+        else:
+            # End of video - loop back to start
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.current_frame_idx = 0
+
+    def _read_and_display_frame(self):
+        """Read and display current frame without advancing."""
+        if self.video_capture is None:
+            return
+        ret, frame = self.video_capture.read()
+        if ret:
+            self._display_frame(frame)
+            self._update_slider()
+
+    def _display_frame(self, frame):
+        """Convert OpenCV frame to QPixmap and display it."""
+        self.current_frame = frame.copy()  # Store for extraction
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+        self._display_pixmap(pixmap)
+
+    def _display_pixmap(self, pixmap: QPixmap):
+        """Scale and display a pixmap."""
+        scaled = pixmap.scaled(
+            self.video_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.video_label.setPixmap(scaled)
+
+    def _update_slider(self):
+        """Update the timeline slider position."""
+        if self.total_frames > 0:
+            progress = int((self.current_frame_idx / self.total_frames) * 1000)
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(progress)
+            self.timeline_slider.blockSignals(False)
+
+    def _on_slider_moved(self, value: int):
+        """Handle slider movement - seek to position."""
+        if self.video_capture is None:
+            return
+        
+        was_playing = self.is_playing
+        if was_playing:
+            self._stop_playback()
+
+        # Calculate target frame
+        target_frame = int((value / 1000.0) * self.total_frames)
+        self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        self.current_frame_idx = target_frame
+        
+        # Read and display the frame
+        ret, frame = self.video_capture.read()
+        if ret:
+            self._display_frame(frame)
+            # Reset position back one frame so next read gets this frame
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            self.current_frame_idx = target_frame
+
+        if was_playing:
+            self._start_playback()
+
+    def _step_frame(self, direction: int):
+        """Step forward or backward by one frame."""
+        if self.video_capture is None:
+            return
+
+        was_playing = self.is_playing
+        if was_playing:
+            self._stop_playback()
+
+        # Calculate new frame position
+        new_frame = self.current_frame_idx + direction
+        new_frame = max(0, min(new_frame, self.total_frames - 1))
+
+        # Seek to new position
+        self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, new_frame)
+        self.current_frame_idx = new_frame
+        
+        # Read and display
+        ret, frame = self.video_capture.read()
+        if ret:
+            self._display_frame(frame)
+            # Reset back one frame so next read advances properly
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, new_frame)
+            self.current_frame_idx = new_frame
+
+    def _extract_current_frame(self):
+        """Save the current video frame as a PNG file."""
+        if self.current_frame is None or not self.current_filepath:
+            return
+
+        video_name = Path(self.current_filepath).stem
+        default_path = f"{video_name}_frame_{self.current_frame_idx}.png"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Frame As PNG", default_path, "PNG Images (*.png)"
+        )
+
+        if filepath:
+            if not filepath.lower().endswith(".png"):
+                filepath += ".png"
+            cv2.imwrite(filepath, self.current_frame)
+            logger.info(f"Saved frame to: {filepath}")
 
     def resizeEvent(self, event: QResizeEvent):
-        if self.current_filepath:
+        # Redisplay current content scaled
+        if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
             pixmap = QPixmap(self.current_filepath)
             if not pixmap.isNull():
-                self._update_scaled_pixmap(pixmap)
+                self._display_pixmap(pixmap)
+        elif self.current_frame is not None:
+            self._display_frame(self.current_frame)
 
         target_height = int(self.height() * 0.25)
         target_height = max(80, min(300, target_height))
@@ -220,19 +453,34 @@ class SingleImageViewer(QWidget):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         if key == Qt.Key.Key_Left:
-            self.prev_requested.emit()
+            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+                self._step_frame(-1)
+            else:
+                self.prev_requested.emit()
         elif key == Qt.Key.Key_Right:
-            self.next_requested.emit()
+            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+                self._step_frame(1)
+            else:
+                self.next_requested.emit()
+        elif key == Qt.Key.Key_Space:
+            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+                self._toggle_play_pause()
         elif key == Qt.Key.Key_Escape:
             self.closed.emit()
         else:
             super().keyPressEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
-        if event.angleDelta().y() > 0:
-            self.prev_requested.emit()
+        if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+            if event.angleDelta().y() > 0:
+                self._step_frame(-1)
+            else:
+                self._step_frame(1)
         else:
-            self.next_requested.emit()
+            if event.angleDelta().y() > 0:
+                self.prev_requested.emit()
+            else:
+                self.next_requested.emit()
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton and self.current_filepath:
@@ -242,8 +490,8 @@ class SingleImageViewer(QWidget):
             mime_data.setUrls(urls)
             drag.setMimeData(mime_data)
 
-            if self.image_label.pixmap():
-                pixmap = self.image_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
+            if self.video_label.pixmap():
+                pixmap = self.video_label.pixmap().scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio)
                 drag.setPixmap(pixmap)
                 drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
 
@@ -255,6 +503,21 @@ class SingleImageViewer(QWidget):
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
+
+    def stop_media(self):
+        """Stop video playback when navigating away."""
+        self._stop_playback()
+        if self.video_capture is not None:
+            self.video_capture.release()
+            self.video_capture = None
+
+    def cleanup(self):
+        """Clean up resources."""
+        self.stop_media()
+
+
+# Alias for backward compatibility
+SingleMediaViewer = OpenCVVideoPlayer
 
 
 class MainWindow(QMainWindow):
@@ -408,8 +671,8 @@ class MainWindow(QMainWindow):
         self.results_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.visualizer_widget = QtVisualizer()
-        self.single_image_view_widget = SingleImageViewer()
-        self.single_image_view_widget.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.single_image_view_widget = SingleMediaViewer()
+        self.single_image_view_widget.video_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.content_stack.addWidget(self.loading_overlay_widget)
         self.content_stack.addWidget(self.results_view)
@@ -434,7 +697,7 @@ class MainWindow(QMainWindow):
         self.visualize_btn.clicked.connect(self.visualization_triggered.emit)
         self.results_view.customContextMenuRequested.connect(self.on_results_context_menu)
         self.results_view.doubleClicked.connect(self._on_image_double_clicked)
-        self.single_image_view_widget.image_label.customContextMenuRequested.connect(self.on_single_view_context_menu)
+        self.single_image_view_widget.video_label.customContextMenuRequested.connect(self.on_single_view_context_menu)
         self.single_image_view_widget.closed.connect(self._return_to_grid_view)
         self.single_image_view_widget.next_requested.connect(self._navigate_next)
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
@@ -600,7 +863,7 @@ class MainWindow(QMainWindow):
             return
         _, filepath = self.results_model.results_data[self.current_single_view_index]
         context_menu = self._create_context_menu(filepath)
-        context_menu.exec(self.single_image_view_widget.image_label.mapToGlobal(pos))
+        context_menu.exec(self.single_image_view_widget.video_label.mapToGlobal(pos))
 
     @Slot(QModelIndex)
     def _on_image_double_clicked(self, index: QModelIndex):
@@ -624,7 +887,7 @@ class MainWindow(QMainWindow):
         if self.current_single_view_index < total_count - 1:
             _, next_filepath = self.results_model.results_data[self.current_single_view_index + 1]
 
-        self.single_image_view_widget.set_image_data(current_filepath, prev_filepath, next_filepath)
+        self.single_image_view_widget.set_media_data(current_filepath, prev_filepath, next_filepath)
 
         status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
         self.update_status_bar(status)
