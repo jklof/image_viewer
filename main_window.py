@@ -441,6 +441,24 @@ class OpenCVVideoPlayer(QWidget):
             cv2.imwrite(filepath, self.current_frame)
             logger.info(f"Saved frame to: {filepath}")
 
+    def get_current_frame_pixmap(self) -> QPixmap | None:
+        """Get the current video frame as a QPixmap for clipboard copying.
+        
+        Returns the current frame if viewing a paused/stopped video,
+        or None if viewing a static image or no frame is available.
+        """
+        if self.current_frame is None:
+            return None
+        
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        
+        # Create QImage with copy to ensure Qt owns the memory
+        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        return QPixmap.fromImage(q_image)
+
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
         if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
@@ -944,6 +962,14 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
 
     def copy_image_to_clipboard(self, filepath: str):
+        # Check if we're in single view with a video - use current frame if available
+        if self.content_stack.currentWidget() is self.single_image_view_widget:
+            video_pixmap = self.single_image_view_widget.get_current_frame_pixmap()
+            if video_pixmap is not None:
+                QApplication.clipboard().setPixmap(video_pixmap)
+                return
+        
+        # Fall back to loading from file path for static images
         pixmap = QPixmap(filepath)
         if not pixmap.isNull():
             QApplication.clipboard().setPixmap(pixmap)
