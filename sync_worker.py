@@ -77,7 +77,7 @@ class SyncWorker(QObject):
 
             result, message = "success", "Synchronization complete."
 
-        except self.db.InterruptedError if self.db else Exception:
+        except ImageDatabase.InterruptedError:
             result, message = "cancelled", "Synchronization cancelled."
         except Exception as e:
             logger.error("--- AN ERROR OCCURRED DURING SYNC ---")

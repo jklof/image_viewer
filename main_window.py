@@ -245,9 +245,12 @@ class OpenCVVideoPlayer(QWidget):
         self.current_filepath = current_path
         self.prev_btn.set_filepath(prev_path)
         self.next_btn.set_filepath(next_path)
-        
-        # Stop any existing playback
+
+        # Stop playback and release any existing capture before loading new media
         self._stop_playback()
+        if self.video_capture is not None:
+            self.video_capture.release()
+            self.video_capture = None
 
         if not current_path:
             self.video_label.setPixmap(QPixmap())

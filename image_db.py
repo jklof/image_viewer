@@ -127,10 +127,11 @@ class EmbeddingConsumerThread(threading.Thread):
                     if batch:
                         self._process_batch(batch)
                         batch = []
-                except Exception:
+                except Exception as e:
                     if self.cancel_flag.is_set():
                         break
-                    raise
+                    logger.error(f"Unhandled exception in consumer inner loop: {e}", exc_info=True)
+                    break
 
         except Exception as e:
             logger.error(f"Unhandled exception in EmbeddingConsumerThread: {e}", exc_info=True)
