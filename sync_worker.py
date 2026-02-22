@@ -85,8 +85,8 @@ class SyncWorker(QObject):
             self.error.emit(traceback.format_exc())
             result, message = "failed", "An error occurred during synchronization."
         finally:
-            self.finished.emit(result, message)
             self.cleanup()
+            self.finished.emit(result, message)
 
     @Slot()
     def cancel(self):
@@ -112,6 +112,6 @@ class SyncWorker(QObject):
         # Only unload embedder if we own it (not shared)
         if self._owns_embedder and self.embedder is not None:
             self.embedder.unload()
-        
+
         self.embedder = None
         logger.info("SyncWorker cleaned up resources.")

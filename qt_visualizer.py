@@ -47,7 +47,7 @@ class QtImageTooltip(QFrame):
     def show_image(self, filepath: str, global_pos: QPoint):
         """Show image from cache. Does NOT block on file I/O."""
         self._current_filepath = filepath
-        
+
         # Check cache first (non-blocking)
         cached = thumbnail_cache.get(filepath)
         if cached:
@@ -72,7 +72,7 @@ class QtImageTooltip(QFrame):
         """Update tooltip when thumbnail is loaded asynchronously."""
         if filepath != self._current_filepath:
             return
-        
+
         cached = thumbnail_cache.get(filepath)
         if cached:
             scaled_pixmap = cached.scaled(

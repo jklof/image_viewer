@@ -114,8 +114,7 @@ class AppController(QObject):
         if self.backend_thread.is_alive():
             logger.error("Backend thread did not shut down gracefully within timeout.")
             self.window.show_critical_error(
-                "Restart Failed",
-                "The backend thread did not shut down properly. Please restart the application."
+                "Restart Failed", "The backend thread did not shut down properly. Please restart the application."
             )
             return
 
@@ -248,10 +247,7 @@ class AppController(QObject):
         self.window.update_status_bar("Sync started. You can continue searching on existing data.")
         self.sync_thread = QThread()
         # Pass the shared embedder to avoid CUDA OOM from double instantiation
-        self.sync_worker = SyncWorker(
-            use_cpu_only=self._use_cpu_only,
-            shared_embedder=self.backend_worker.embedder
-        )
+        self.sync_worker = SyncWorker(use_cpu_only=self._use_cpu_only, shared_embedder=self.backend_worker.embedder)
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_worker.status_update.connect(self.window.update_sync_status)
         self.sync_worker.progress_update.connect(self.window.update_sync_progress)

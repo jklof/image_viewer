@@ -106,7 +106,7 @@ class NavThumbnail(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         draw_rect = self.rect().adjusted(5, 5, -5, -5)
 
-        path = QRegion(draw_rect, QRegion.RegionType.Ellipse if False else QRegion.RegionType.Rectangle)
+        path = QRegion(draw_rect, QRegion.RegionType.Rectangle)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(45, 45, 45))
         painter.drawRoundedRect(draw_rect, 8, 8)
@@ -147,6 +147,7 @@ class OpenCVVideoPlayer(QWidget):
     Video player using OpenCV for reliable cross-platform playback.
     Uses QTimer to drive frame updates.
     """
+
     closed = Signal()
     next_requested = Signal()
     prev_requested = Signal()
@@ -289,7 +290,7 @@ class OpenCVVideoPlayer(QWidget):
 
         # Display first frame
         self._read_and_display_frame()
-        
+
         # Start playback
         self._start_playback()
 
@@ -343,17 +344,17 @@ class OpenCVVideoPlayer(QWidget):
     def _display_frame(self, frame):
         """Convert OpenCV frame to QPixmap and display it."""
         self.current_frame = frame.copy()  # Store original BGR for extraction
-        
+
         # Convert BGR to RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        
-        # .copy() is CRITICAL here so Qt maintains ownership of the memory 
+
+        # .copy() is CRITICAL here so Qt maintains ownership of the memory
         # when the Python numpy array is garbage collected!
         q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(q_image)
-        
+
         # Display as video (FastTransformation for CPU efficiency)
         self._display_pixmap(pixmap, is_video=True)
 
@@ -361,13 +362,11 @@ class OpenCVVideoPlayer(QWidget):
         """Scale and display a pixmap."""
         # Use FastTransformation for 30/60fps video to prevent CPU overload,
         # but keep SmoothTransformation for standard static images
-        transform_mode = Qt.TransformationMode.FastTransformation if is_video else Qt.TransformationMode.SmoothTransformation
-        
-        scaled = pixmap.scaled(
-            self.video_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            transform_mode
+        transform_mode = (
+            Qt.TransformationMode.FastTransformation if is_video else Qt.TransformationMode.SmoothTransformation
         )
+
+        scaled = pixmap.scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio, transform_mode)
         self.video_label.setPixmap(scaled)
 
     def _update_slider(self):
@@ -382,7 +381,7 @@ class OpenCVVideoPlayer(QWidget):
         """Handle slider movement - seek to position."""
         if self.video_capture is None:
             return
-        
+
         was_playing = self.is_playing
         if was_playing:
             self._stop_playback()
@@ -391,12 +390,12 @@ class OpenCVVideoPlayer(QWidget):
         target_frame = int((value / 1000.0) * self.total_frames)
         self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
         self.current_frame_idx = target_frame
-        
+
         # Read and display the frame (this naturally advances the OpenCV read pointer)
         ret, frame = self.video_capture.read()
         if ret:
             self._display_frame(frame)
-            
+
         if was_playing:
             self._start_playback()
 
@@ -433,9 +432,7 @@ class OpenCVVideoPlayer(QWidget):
         video_name = Path(self.current_filepath).stem
         default_path = f"{video_name}_frame_{self.current_frame_idx}.png"
 
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "Save Frame As PNG", default_path, "PNG Images (*.png)"
-        )
+        filepath, _ = QFileDialog.getSaveFileName(self, "Save Frame As PNG", default_path, "PNG Images (*.png)")
 
         if filepath:
             if not filepath.lower().endswith(".png"):
@@ -446,18 +443,18 @@ class OpenCVVideoPlayer(QWidget):
 
     def get_current_frame_pixmap(self) -> QPixmap | None:
         """Get the current video frame as a QPixmap for clipboard copying.
-        
+
         Returns the current frame if viewing a paused/stopped video,
         or None if viewing a static image or no frame is available.
         """
         if self.current_frame is None:
             return None
-        
+
         # Convert BGR to RGB
         rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        
+
         # Create QImage with copy to ensure Qt owns the memory
         q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         return QPixmap.fromImage(q_image)
@@ -971,7 +968,7 @@ class MainWindow(QMainWindow):
             if video_pixmap is not None:
                 QApplication.clipboard().setPixmap(video_pixmap)
                 return
-        
+
         # Fall back to loading from file path for static images
         pixmap = QPixmap(filepath)
         if not pixmap.isNull():
