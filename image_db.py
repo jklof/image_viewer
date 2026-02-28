@@ -9,7 +9,6 @@ import io  # Required for byte manipulation
 from collections import defaultdict
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -54,11 +53,23 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
             if ext in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
                 img = None
                 if ext == ".mp4":
-                    # Extract middle frame using OpenCV
+                    import cv2
+
+                    # Extract frame using OpenCV (max 6 seconds in to avoid long decode times)
                     cap = cv2.VideoCapture(str(filepath))
                     if cap.isOpened():
                         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames // 2))
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        if fps <= 0:
+                            fps = 30.0
+
+                        target_frame = total_frames // 2
+                        six_seconds_frames = int(fps * 6)
+
+                        # Use 6 seconds or half the video, whichever is shorter
+                        seek_frame = min(target_frame, six_seconds_frames)
+
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, seek_frame))
                         ret, frame = cap.read()
                         if ret:
                             # Convert BGR to RGB

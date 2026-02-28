@@ -248,12 +248,11 @@ class UniversalQueryBuilder(QWidget):
 
     @Slot()
     def clear_all_elements(self):
-        while (item := self.element_list_layout.takeAt(0)) is not None:
-            if item.widget():
+        for i in reversed(range(self.element_list_layout.count())):
+            item = self.element_list_layout.itemAt(i)
+            if item and isinstance(item.widget(), QueryElementWidget):
                 item.widget().deleteLater()
-            else:
-                self.element_list_layout.addStretch()
-                break
+                self.element_list_layout.takeAt(i)
         self._check_search_button_state()
 
     def _get_all_elements_data(self) -> list[dict]:

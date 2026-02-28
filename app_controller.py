@@ -91,6 +91,9 @@ class AppController(QObject):
 
         logger.info("Soft restart initiated due to database/model changes.")
 
+        # Store old signals before reassignment
+        old_signals = self.backend_signals
+
         # Disable controls during restart
         self.window.set_controls_enabled(False)
 
@@ -128,7 +131,7 @@ class AppController(QObject):
         self.backend_thread = threading.Thread(target=self.backend_worker.run, daemon=True)
 
         # Reconnect signals for the new backend
-        self._connect_backend_signals()
+        self._connect_backend_signals(old_signals=old_signals)
 
         # Restart backend thread
         logger.info("Starting new backend worker thread...")
@@ -140,17 +143,20 @@ class AppController(QObject):
 
         logger.info("Soft restart completed successfully.")
 
-    def _connect_backend_signals(self):
+    def _connect_backend_signals(self, old_signals=None):
         """Reconnect backend signals after soft restart."""
+        if old_signals is None:
+            return  # No old signals to disconnect
+
         # Disconnect existing backend signals first
         try:
-            self.backend_signals.initialized.disconnect(self.on_backend_initialized)
-            self.backend_signals.error.disconnect(self.on_backend_error)
-            self.backend_signals.results_ready.disconnect(self.on_results_ready)
-            self.backend_signals.status_update.disconnect(self.window.update_status_bar)
-            self.backend_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
-            self.backend_signals.reloaded.disconnect(self.on_backend_reloaded)
-        except:
+            old_signals.initialized.disconnect(self.on_backend_initialized)
+            old_signals.error.disconnect(self.on_backend_error)
+            old_signals.results_ready.disconnect(self.on_results_ready)
+            old_signals.status_update.disconnect(self.window.update_status_bar)
+            old_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
+            old_signals.reloaded.disconnect(self.on_backend_reloaded)
+        except RuntimeError:
             pass  # Ignore disconnection errors
 
         # Reconnect backend signals

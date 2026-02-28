@@ -23,107 +23,87 @@ logger = logging.getLogger(__name__)
 THUMBNAIL_CACHE_SIZE = 2000
 # High worker count is safe here; Condition variables prevent CPU busy loops
 NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
-MAX_PENDING_JOBS = 100
 
 
-class ThumbnailCache:
-    """Thread-safe cache optimized for LOCKLESS reads on the UI Thread."""
+class LRUThumbnailCache:
+    """Thread-safe LRU cache using OrderedDict."""
 
-    def __init__(self, size):
-        self.cache = {}
-        self.cleanup_queue = collections.deque()
-        self.size = size
+    def __init__(self, capacity: int):
+        self.cache = collections.OrderedDict()
+        self.capacity = capacity
         self.lock = threading.Lock()
 
     def get(self, key):
-        # FAST PATH: Dictionary `.get()` is atomic in Python.
-        # No lock required! The UI Thread never waits for background workers here.
-        return self.cache.get(key)
+        with self.lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            return None
 
     def put(self, key, value):
         with self.lock:
-            if key in self.cache:
-                return
-
             self.cache[key] = value
-            self.cleanup_queue.append(key)
-
-            # Simple FIFO cleanup is perfectly fine for thumbnails
-            # and avoids mutating the dictionary on reads.
-            if len(self.cache) > self.size:
-                oldest_key = self.cleanup_queue.popleft()
-                self.cache.pop(oldest_key, None)
+            self.cache.move_to_end(key)
+            if len(self.cache) > self.capacity:
+                self.cache.popitem(last=False)
 
 
-thumbnail_cache = ThumbnailCache(THUMBNAIL_CACHE_SIZE)
+thumbnail_cache = LRUThumbnailCache(THUMBNAIL_CACHE_SIZE)
 
 
-class PersistentWorker(QRunnable):
-    def __init__(self, manager: "LoaderManager"):
+class LoadThumbnailTask(QRunnable):
+    """A discrete, fire-and-forget task for the QThreadPool."""
+
+    def __init__(self, filepath: str, manager: "LoaderManager"):
         super().__init__()
+        self.filepath = filepath
         self.manager = manager
-        self.setAutoDelete(False)
+        self.setAutoDelete(True)
 
     def run(self):
+        if self.manager._is_shutting_down:
+            return
+
         try:
-            while not self.manager._is_shutting_down:
-                filepath = self.manager.get_next_job()
-                if not filepath:
-                    continue
+            # 1. Fast path cache check
+            if thumbnail_cache.get(self.filepath):
+                return
 
-                try:
-                    # 1. Fast path cache check
-                    if thumbnail_cache.get(filepath):
-                        continue
+            ext = self.filepath.lower()
+            image = QImage()
 
-                    # 2. Check file extension for video vs image
-                    ext = filepath.lower()
-                    image = QImage()
+            if ext.endswith(".mp4"):
+                cap = cv2.VideoCapture(self.filepath)
+                if cap.isOpened():
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
+                    ret, frame = cap.read()
+                    if ret:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        h, w, ch = frame.shape
+                        bytes_per_line = ch * w
+                        tmp_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                        image = tmp_img.copy()
+                cap.release()
+            else:
+                image = QImage(self.filepath)
 
-                    if ext.endswith(".mp4"):
-                        # Handle video thumbnail using OpenCV
-                        cap = cv2.VideoCapture(filepath)
-                        if cap.isOpened():
-                            # Grab frame at 10% in to avoid black starting frames
-                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
-                            ret, frame = cap.read()
-                            if ret:
-                                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                h, w, ch = frame.shape
-                                bytes_per_line = ch * w
-                                # Create QImage pointing to numpy data, then COPY it so
-                                # we can garbage collect the numpy array safely.
-                                tmp_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                                image = tmp_img.copy()
-                        cap.release()
-                    else:
-                        # Handle regular image files
-                        image = QImage(filepath)
+            if not image.isNull():
+                if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
+                    image = image.scaled(
+                        THUMBNAIL_SIZE,
+                        THUMBNAIL_SIZE,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                self.manager._internal_worker_result.emit(self.filepath, image)
+            else:
+                self.manager._internal_worker_result.emit(self.filepath, QImage())
 
-                    if not image.isNull():
-                        # 3. Scale on the background thread
-                        if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
-                            image = image.scaled(
-                                THUMBNAIL_SIZE,
-                                THUMBNAIL_SIZE,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation,
-                            )
-
-                        # 4. Convert to optimal GPU texture format on the background thread!
-                        # This turns QPixmap.fromImage() on the Main Thread into an instant O(1) memory copy.
-                        image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-
-                        self.manager._internal_worker_result.emit(filepath, image)
-                    else:
-                        self.manager._internal_worker_result.emit(filepath, QImage())
-
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Thumbnail load failed for {self.filepath}: {e}")
+            self.manager._internal_worker_result.emit(self.filepath, QImage())
 
 
 class LoaderManager(QObject):
@@ -135,60 +115,37 @@ class LoaderManager(QObject):
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(NUM_WORKERS)
         self._is_shutting_down = False
+        self._task_counter = 0  # Used to ensure newer requests jump to the front of the queue
 
-        # --- ROCK SOLID SYNCHRONIZATION ---
-        # Replacing the fragile Semaphore with a Condition variable.
+        # Keep track of active tasks to prevent duplicate queuing
         self.lock = threading.Lock()
-        self.condition = threading.Condition(self.lock)
-        self.queue = collections.deque()
         self.pending_jobs = set()
 
         self._internal_worker_result.connect(self._on_worker_result_ready)
 
     def initialize(self):
-        if self._is_shutting_down:
-            return
-        logger.info("LoaderManager initializing workers...")
-        for _ in range(NUM_WORKERS):
-            worker = PersistentWorker(self)
-            self.thread_pool.start(worker)
+        self._is_shutting_down = False
 
     @Slot(str)
     def request_thumbnail(self, filepath: str):
         if self._is_shutting_down:
             return
+
         if thumbnail_cache.get(filepath):
             return
 
-        with self.condition:
+        with self.lock:
             if filepath in self.pending_jobs:
                 return
-
-            # Enforce max size (LIFO drop oldest job from the right)
-            while len(self.queue) >= MAX_PENDING_JOBS:
-                try:
-                    discarded = self.queue.pop()
-                    self.pending_jobs.discard(discarded)
-                except IndexError:
-                    break
-
             self.pending_jobs.add(filepath)
-            self.queue.appendleft(filepath)  # Add newest to the left
 
-            # Wake up exactly one sleeping worker
-            self.condition.notify()
+            # Increment to ensure this new task gets the highest execution priority
+            self._task_counter += 1
+            current_priority = self._task_counter
 
-    def get_next_job(self) -> str | None:
-        with self.condition:
-            # Sleep perfectly without spinning the CPU while the queue is empty
-            while len(self.queue) == 0 and not self._is_shutting_down:
-                self.condition.wait(0.5)
-
-            if self._is_shutting_down or len(self.queue) == 0:
-                return None
-
-            # Return newest job
-            return self.queue.popleft()
+        task = LoadThumbnailTask(filepath, self)
+        # Passing priority to QThreadPool forces LIFO behavior (snappy scrolling)
+        self.thread_pool.start(task, current_priority)
 
     @Slot(str, QImage)
     def _on_worker_result_ready(self, filepath: str, image: QImage):
@@ -210,10 +167,7 @@ class LoaderManager(QObject):
 
     def shutdown(self):
         self._is_shutting_down = True
-        with self.condition:
-            self.queue.clear()
-            self.pending_jobs.clear()
-            self.condition.notify_all()  # Wake all threads so they exit cleanly
+        self.thread_pool.clear()
         self.thread_pool.waitForDone(1500)
 
 

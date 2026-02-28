@@ -23,8 +23,12 @@ class ImageEmbedder:
 
         if use_cpu_only:
             self.device = "cpu"
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = "mps"
         else:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = "cpu"
         logger.info(f"ImageEmbedder initializing. Using device: {self.device}")
 
         model_kwargs = {}
