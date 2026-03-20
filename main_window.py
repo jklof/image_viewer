@@ -590,6 +590,9 @@ class OpenCVVideoPlayer(QWidget):
     def cleanup(self):
         """Clean up resources."""
         self.stop_media()
+        if self.video_worker.isRunning():
+            self.video_worker.stop()
+            self.video_worker.wait()
 
 
 # Alias for backward compatibility
@@ -1025,5 +1028,6 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setPixmap(pixmap)
 
     def closeEvent(self, event):
+        self.single_image_view_widget.cleanup()
         self.closing.emit()
         event.accept()
