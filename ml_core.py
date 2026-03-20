@@ -45,12 +45,27 @@ class ImageEmbedder:
         self.embedding_shape = (1, embedding_dim)
         self.embedding_dtype = np.float32
 
+    def _extract_tensor(self, features):
+        import torch
+        if isinstance(features, torch.Tensor):
+            return features
+        if hasattr(features, "pooler_output") and features.pooler_output is not None:
+            return features.pooler_output
+        if hasattr(features, "image_embeds") and features.image_embeds is not None:
+            return features.image_embeds
+        if hasattr(features, "text_embeds") and features.text_embeds is not None:
+            return features.text_embeds
+        if isinstance(features, tuple):
+            return features[1] if len(features) > 1 else features[0]
+        return features[0]
+
     def embed_image(self, image: Image.Image) -> np.ndarray:
         import torch
 
         with torch.no_grad():
             inputs = self.processor(images=image, return_tensors="pt").to(self.device)
             features = self.model.get_image_features(**inputs)
+            features = self._extract_tensor(features)
             # Normalize in Torch (faster on CUDA)
             features = features / features.norm(dim=-1, keepdim=True)
             return features.cpu().numpy().astype(self.embedding_dtype)
@@ -61,6 +76,7 @@ class ImageEmbedder:
         with torch.no_grad():
             inputs = self.processor(text=text, return_tensors="pt").to(self.device)
             features = self.model.get_text_features(**inputs)
+            features = self._extract_tensor(features)
             # Normalize in Torch
             features = features / features.norm(dim=-1, keepdim=True)
             return features.cpu().numpy().astype(self.embedding_dtype)
@@ -74,6 +90,7 @@ class ImageEmbedder:
                 batch = images[i : i + batch_size]
                 inputs = self.processor(images=batch, return_tensors="pt", padding=True).to(self.device)
                 features = self.model.get_image_features(**inputs)
+                features = self._extract_tensor(features)
                 # Normalize in Torch
                 features = features / features.norm(dim=-1, keepdim=True)
                 all_embeddings.extend(features.cpu().numpy().astype(self.embedding_dtype))
