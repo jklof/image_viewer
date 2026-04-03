@@ -296,6 +296,19 @@ class ImageDatabase:
             )
             conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             
+            # --- TAGS TABLE ---
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS tags (
+                    sha256 TEXT NOT NULL,
+                    tag_name TEXT NOT NULL,
+                    PRIMARY KEY (sha256, tag_name),
+                    FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_sha256 ON tags(sha256)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag_name ON tags(tag_name)")
+            # -----------------
+            
             # --- POISON PILL: Insert sentinel for invalid files ---
             # This satisfies the FK constraint for files that fail hashing/decoding.
             # We use a minimal 1-byte blob as placeholder.
@@ -669,7 +682,7 @@ class ImageDatabase:
             for sha, path in conn.execute("SELECT sha256, filepath FROM filepaths").fetchall():
                 self._sha_to_path_map_cache[sha].append(path)
 
-    def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[float, str]]:
+    def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[float, str, str]]:
         # --- OPTIMIZATION: Efficient Numpy Search ---
         if self._embedding_matrix is None or len(self._embedding_matrix) == 0:
             return []
@@ -687,14 +700,20 @@ class ImageDatabase:
         else:
             indices = np.argsort(similarities)[::-1]
 
+        # Fetch ALL tags into a dictionary in a single lightning-fast query
+        sha_to_tags = {}
+        with self._get_db_connection() as conn:
+            for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256"):
+                sha_to_tags[sha] = tags
+
         results = []
         for i in indices:
             # Safe: _shas_in_order and _embedding_matrix are always in sync
-            # (both filtered from the same query excluding the sentinel)
             sha = self._shas_in_order[i]
             paths = self._sha_to_path_map_cache.get(sha)
             if paths:
-                results.append((float(similarities[i]), paths[0]))
+                tags = sha_to_tags.get(sha, "")
+                results.append((float(similarities[i]), paths[0], tags))
         return results
         # --------------------------------------------
 
@@ -713,22 +732,100 @@ class ImageDatabase:
 
     def get_all_unique_filepaths(self):
         with self._get_db_connection() as conn:
-            # Exclude invalid files from the UI - they would show as broken/black thumbnails
-            return [
-                r[0]
-                for r in conn.execute(
-                    "SELECT MIN(filepath) FROM filepaths WHERE sha256 != ? GROUP BY sha256",
-                    (INVALID_FILE_SENTINEL,),
-                ).fetchall()
-            ]
+            # Exclude invalid files. Use a correlated subquery for tags to avoid massive GROUP BY tables.
+            rows = conn.execute(
+                """SELECT MIN(filepath) as filepath, sha256, 
+                          (SELECT GROUP_CONCAT(tag_name) FROM tags WHERE sha256 = f.sha256) as tags
+                   FROM filepaths f
+                   WHERE sha256 != ?
+                   GROUP BY sha256""",
+                (INVALID_FILE_SENTINEL,),
+            ).fetchall()
+            return [(row[0], row[2] or "") for row in rows]
 
     def get_all_filepaths_with_mtime(self):
         with self._get_db_connection() as conn:
-            # Exclude invalid files from the UI - they would show as broken/black thumbnails
-            return conn.execute(
-                "SELECT filepath, mtime FROM filepaths WHERE sha256 != ?",
+            # Correlated subquery is much faster here than LEFT JOIN + GROUP BY
+            rows = conn.execute(
+                """SELECT filepath, mtime, 
+                          (SELECT GROUP_CONCAT(tag_name) FROM tags WHERE sha256 = f.sha256) as tags
+                   FROM filepaths f
+                   WHERE sha256 != ?""",
                 (INVALID_FILE_SENTINEL,),
             ).fetchall()
+            return [(row[0], row[1], row[2] or "") for row in rows]
+
+    def _get_sha256_for_filepaths(self, filepath_list: list[str]) -> list[str]:
+        """Convert filepaths to their corresponding SHA256 hashes."""
+        if not filepath_list:
+            return []
+        
+        sha256_list = []
+        with self._get_db_connection() as conn:
+            for i in range(0, len(filepath_list), SQLITE_VARIABLE_LIMIT):
+                chunk = filepath_list[i:i + SQLITE_VARIABLE_LIMIT]
+                placeholders = ", ".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"SELECT sha256 FROM filepaths WHERE filepath IN ({placeholders})",
+                    chunk
+                )
+                sha256_list.extend(row[0] for row in cursor.fetchall())
+        return sha256_list
+
+    def toggle_tag(self, filepath_or_sha_list: list[str], tag_name: str = "marked"):
+        """Toggle a tag for a list of filepaths or SHA256 hashes."""
+        if not filepath_or_sha_list:
+            return
+        
+        # Convert filepaths to SHA256 if needed
+        sha256_list = self._get_sha256_for_filepaths(filepath_or_sha_list)
+        if not sha256_list:
+            logger.warning("No valid SHA256 hashes found for the provided filepaths")
+            return
+        
+        with self._get_db_connection() as conn:
+            for i in range(0, len(sha256_list), SQLITE_VARIABLE_LIMIT):
+                chunk = sha256_list[i:i + SQLITE_VARIABLE_LIMIT]
+                placeholders = ", ".join("?" for _ in chunk)
+                
+                # Find which SHAs already have this tag
+                cursor = conn.execute(
+                    f"SELECT sha256 FROM tags WHERE sha256 IN ({placeholders}) AND tag_name = ?",
+                    chunk + [tag_name]
+                )
+                tagged_shas = {row[0] for row in cursor.fetchall()}
+                
+                # Toggle: remove if tagged, add if not
+                for sha in chunk:
+                    if sha in tagged_shas:
+                        conn.execute(
+                            "DELETE FROM tags WHERE sha256 = ? AND tag_name = ?",
+                            (sha, tag_name)
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)",
+                            (sha, tag_name)
+                        )
+
+    def untag_all(self, tag_name: str = "marked"):
+        """Remove a specific tag from all images."""
+        with self._get_db_connection() as conn:
+            conn.execute("DELETE FROM tags WHERE tag_name = ?", (tag_name,))
+
+    def delete_target_filepaths(self, filepath_list: list[str]):
+        """Delete specific filepaths from the database without full sync."""
+        if not filepath_list:
+            return
+        
+        with self._get_db_connection() as conn:
+            for i in range(0, len(filepath_list), SQLITE_VARIABLE_LIMIT):
+                chunk = filepath_list[i:i + SQLITE_VARIABLE_LIMIT]
+                placeholders = ", ".join("?" for _ in chunk)
+                conn.execute(f"DELETE FROM filepaths WHERE filepath IN ({placeholders})", chunk)
+        
+        # Clean up orphaned embeddings after deletion
+        self._cleanup_orphaned_embeddings()
 
     def get_all_embeddings_with_shas(self):
         with self._get_db_connection() as conn:
