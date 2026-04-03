@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
 from PySide6.QtGui import QPixmap, QCursor
 from PySide6.QtCore import Qt, Signal, Slot, QPoint, QTimer
 
-from loader_manager import loader_manager, thumbnail_cache
+from loader_manager import get_loader_manager, thumbnail_cache
 
 # Ensure PySide6 compatibility
 pg.setConfigOption("leftButtonPan", False)  # Use right-click for pan, left for selecting/hover
@@ -62,7 +62,7 @@ class QtImageTooltip(QFrame):
             self.setVisible(True)
         else:
             # Request async load - tooltip will be updated via update_from_cache
-            loader_manager.request_thumbnail(filepath)
+            get_loader_manager().request_thumbnail(filepath)
             # Show loading placeholder
             self.image_label.setText("Loading...")
             self.move(global_pos + QPoint(20, 20))
@@ -137,7 +137,7 @@ class QtVisualizer(QWidget):
         self._pending_hover_data = None  # Store data temporarily
 
         # Connect to async thumbnail loading
-        loader_manager.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        get_loader_manager().thumbnail_loaded.connect(self._on_thumbnail_loaded)
 
     def showEvent(self, event):
         super().showEvent(event)

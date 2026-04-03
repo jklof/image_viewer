@@ -48,7 +48,7 @@ from qt_visualizer import QtVisualizer
 from loading_spinner import PulsingSpinner
 from ui_components import SearchResultDelegate, FILEPATH_ROLE, SmoothListView
 from virtual_model import ImageResultModel
-from loader_manager import loader_manager, thumbnail_cache
+from loader_manager import get_loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
 from constants import ITEM_WIDTH, ITEM_HEIGHT
 
@@ -68,14 +68,14 @@ class NavThumbnail(QWidget):
         self.filepath = None
         self.setFixedWidth(160)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        loader_manager.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        get_loader_manager().thumbnail_loaded.connect(self._on_thumbnail_loaded)
         self._is_hovered = False
 
     def set_filepath(self, path: str | None):
         self.filepath = path
         self.setVisible(path is not None)
         if path and not thumbnail_cache.get(path):
-            loader_manager.request_thumbnail(path)
+            get_loader_manager().request_thumbnail(path)
         self.update()
 
     @Slot(str)

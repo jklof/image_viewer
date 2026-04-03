@@ -3,7 +3,7 @@ import logging
 import collections
 
 from constants import FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
-from loader_manager import loader_manager, thumbnail_cache
+from loader_manager import get_loader_manager, thumbnail_cache
 from ui_components import create_placeholder_pixmap
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class ImageResultModel(QAbstractListModel):
         self.placeholder_pixmap = create_placeholder_pixmap()
         # Map filepath to list of row indices (handles duplicate filepaths)
         self._filepath_to_row_map = collections.defaultdict(list)
-        loader_manager.thumbnail_loaded.connect(self.on_thumbnail_ready)
+        get_loader_manager().thumbnail_loaded.connect(self.on_thumbnail_ready)
 
     def rowCount(self, parent=QModelIndex()):
         return len(self.results_data)
@@ -50,7 +50,7 @@ class ImageResultModel(QAbstractListModel):
 
             # 2. Request Load
             # Since we use LIFO in the loader, it is safe to spam requests here.
-            loader_manager.request_thumbnail(filepath)
+            get_loader_manager().request_thumbnail(filepath)
 
             # 3. Return None (Delegate will draw the placeholder)
             return None

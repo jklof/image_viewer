@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 from app_controller import AppController
 from main_window import MainWindow
-from loader_manager import loader_manager
+from loader_manager import get_loader_manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,13 +33,13 @@ def main():
 
     # --- INITIALIZE LOADER ---
     # Must be done after QApplication is created so QTimer can start.
-    loader_manager.initialize()
+    get_loader_manager().initialize()
 
     controller = AppController(main_window=window, use_cpu_only=args.cpu_only)
     controller.initialize_app()
     window.show()
     exit_code = app.exec()
-    loader_manager.shutdown()
+    get_loader_manager().shutdown()
     sys.exit(exit_code)
 
 

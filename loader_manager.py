@@ -171,4 +171,11 @@ class LoaderManager(QObject):
         self.thread_pool.waitForDone(1500)
 
 
-loader_manager = LoaderManager()
+_loader_manager_instance = None
+
+def get_loader_manager() -> LoaderManager:
+    """Lazily instantiate LoaderManager to ensure QApplication exists first."""
+    global _loader_manager_instance
+    if _loader_manager_instance is None:
+        _loader_manager_instance = LoaderManager()
+    return _loader_manager_instance
