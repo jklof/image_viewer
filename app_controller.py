@@ -1,11 +1,16 @@
 import logging
 import queue
 import threading
+import os
+import shutil
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Slot, Signal
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from backend import BackendWorker, BackendSignals
 from sync_worker import SyncWorker
+from config_utils import get_scan_directories, save_config, load_config
 
 from typing import TYPE_CHECKING
 
@@ -44,6 +49,7 @@ class AppController(QObject):
         self.sync_worker = None
         self._cached_visualization_data = None
         self._visualization_data_dirty = True
+        self._tagged_only_filter = False
 
         self._connect_signals()
 
@@ -77,6 +83,13 @@ class AppController(QObject):
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
         self.window.visualizer_widget.status_update.connect(self.window.update_status_bar)
+        
+        # Tagging signals
+        self.window.toggle_tags_requested.connect(self.on_toggle_tags_requested)
+        self.window.untag_all_requested.connect(self.on_untag_all_requested)
+        self.window.move_tagged_requested.connect(self.on_move_tagged_requested)
+        self.window.delete_tagged_requested.connect(self.on_delete_tagged_requested)
+        self.window.show_tagged_only_btn.toggled.connect(self.on_show_tagged_only_toggled)
 
     @Slot(bool)
     def on_preferences_saved(self, requires_restart: bool):
@@ -182,21 +195,28 @@ class AppController(QObject):
         self.window.clear_results()
         self.window.show_loading_state("Constructing query...")
         self.window.set_controls_enabled(False)
-        self.backend_job_queue.put(("composite_search", query_elements))
+        # Wrap payload in dict to include the filter state
+        payload = {
+            "query_elements": query_elements,
+            "tagged_only": self._tagged_only_filter
+        }
+        self.backend_job_queue.put(("composite_search", payload))
 
     @Slot()
     def on_random_order_requested(self):
         self.window.clear_results()
         self.window.show_loading_state("Randomly reordering...")
         self.window.set_controls_enabled(False)
-        self.backend_job_queue.put(("random_search", None))
+        # Pass the filter state
+        self.backend_job_queue.put(("random_search", {"tagged_only": self._tagged_only_filter}))
 
     @Slot()
     def on_sort_by_date_requested(self):
         self.window.clear_results()
         self.window.show_loading_state("Sorting images by date...")
         self.window.set_controls_enabled(False)
-        self.backend_job_queue.put(("sort_by_date", None))
+        # Pass the filter state
+        self.backend_job_queue.put(("sort_by_date", {"tagged_only": self._tagged_only_filter}))
 
     @Slot()
     def on_visualization_requested(self):
@@ -323,3 +343,221 @@ class AppController(QObject):
         self.backend_worker.shutdown()
         self.backend_thread.join(timeout=5)
         logger.info("Backend worker thread shut down.")
+
+    @Slot(list)
+    def on_toggle_tags_requested(self, indices: list):
+        """Optimistically toggle tags for selected images."""
+        if not indices:
+            return
+        
+        # Optimistically update UI first
+        self.window.results_model.toggle_tag_for_rows([idx.row() for idx in indices])
+        
+        # Extract SHA256 hashes for the selected items
+        sha256_list = []
+        for index in indices:
+            row = index.row()
+            if 0 <= row < len(self.window.results_model.results_data):
+                _, filepath, _ = self.window.results_model.results_data[row]
+                # We need to get the SHA256 from the backend
+                # For now, we'll use filepath as a proxy
+                sha256_list.append(filepath)
+        
+        # Dispatch job to backend (filepath will be converted to SHA256 there)
+        self.backend_job_queue.put(("toggle_tags", {"sha256_list": sha256_list, "tag_name": "marked"}))
+
+    @Slot()
+    def on_untag_all_requested(self):
+        """Remove all tags from all images."""
+        reply = QMessageBox.question(
+            self.window,
+            "Untag All",
+            "Are you sure you want to remove the 'marked' tag from all images?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.backend_job_queue.put(("untag_all", {"tag_name": "marked"}))
+            # Trigger a refresh to update the UI
+            self.on_random_order_requested()
+
+    @Slot()
+    def on_move_tagged_requested(self):
+        """Move tagged files to a user-selected directory."""
+        # Get tagged filepaths from the model
+        tagged_filepaths = []
+        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+            if "marked" in tags:
+                tagged_filepaths.append(filepath)
+        
+        if not tagged_filepaths:
+            QMessageBox.information(self.window, "Move Tagged Files", "No files are tagged.")
+            return
+        
+        # Prompt user for destination directory
+        destination = QFileDialog.getExistingDirectory(
+            self.window,
+            "Select Destination Directory for Tagged Files"
+        )
+        
+        if not destination:
+            return  # User cancelled
+        
+        # Boundary check: verify destination is within tracked directories
+        tracked_dirs = get_scan_directories()
+        dest_path = Path(destination).resolve()
+        is_within_tracked = any(
+            dest_path.is_relative_to(Path(d).resolve()) or dest_path == Path(d).resolve()
+            for d in tracked_dirs
+        )
+        
+        if not is_within_tracked:
+            reply = QMessageBox.question(
+                self.window,
+                "Destination Not Tracked",
+                f"The directory '{destination}' is not currently in your scan directories.\n\n"
+                "Would you like to add it to the scan directories?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                # Update config to include new directory
+                config = load_config()
+                if destination not in config.get("directories", []):
+                    config.setdefault("directories", []).append(destination)
+                    save_config(config)
+                    logger.info(f"Added '{destination}' to scan directories.")
+            else:
+                return  # User declined
+        
+        # Spawn thread to move files
+        self.window.update_status_bar(f"Moving {len(tagged_filepaths)} tagged files...")
+        self.window.set_controls_enabled(False)
+        
+        move_thread = threading.Thread(
+            target=self._move_files_thread,
+            args=(tagged_filepaths, destination),
+            daemon=True
+        )
+        move_thread.start()
+
+    def _move_files_thread(self, filepaths: list[str], destination: str):
+        """Thread function to move files with collision handling."""
+        moved_count = 0
+        error_count = 0
+        
+        for filepath in filepaths:
+            try:
+                src = Path(filepath)
+                dest_dir = Path(destination)
+                dest_file = dest_dir / src.name
+                
+                # Handle filename collisions
+                if dest_file.exists():
+                    stem = src.stem
+                    suffix = src.suffix
+                    counter = 1
+                    while dest_file.exists():
+                        dest_file = dest_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
+                
+                shutil.move(str(src), str(dest_file))
+                moved_count += 1
+            except Exception as e:
+                logger.error(f"Failed to move {filepath}: {e}")
+                error_count += 1
+        
+        # Report results on main thread
+        message = f"Moved {moved_count} files."
+        if error_count > 0:
+            message += f" {error_count} errors occurred."
+        
+        # Trigger sync to reconcile DB
+        self.on_sync_requested()
+        self.window.update_status_bar(message)
+
+    @Slot()
+    def on_delete_tagged_requested(self):
+        """Delete tagged files with a critical warning."""
+        # Get tagged filepaths from the model
+        tagged_filepaths = []
+        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+            if "marked" in tags:
+                tagged_filepaths.append(filepath)
+        
+        if not tagged_filepaths:
+            QMessageBox.information(self.window, "Delete Tagged Files", "No files are tagged.")
+            return
+        
+        # Critical warning
+        reply = QMessageBox.warning(
+            self.window,
+            "Delete Tagged Files",
+            f"WARNING: This will permanently delete {len(tagged_filepaths)} files from disk.\n\n"
+            "This action cannot be undone!\n\n"
+            "Are you absolutely sure you want to proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Spawn thread to delete files
+        self.window.update_status_bar(f"Deleting {len(tagged_filepaths)} tagged files...")
+        self.window.set_controls_enabled(False)
+        
+        delete_thread = threading.Thread(
+            target=self._delete_files_thread,
+            args=(tagged_filepaths,),
+            daemon=True
+        )
+        delete_thread.start()
+
+    def _delete_files_thread(self, filepaths: list[str]):
+        """Thread function to delete files."""
+        deleted_count = 0
+        error_count = 0
+        
+        for filepath in filepaths:
+            try:
+                os.remove(filepath)
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete {filepath}: {e}")
+                error_count += 1
+        
+        # Report results
+        message = f"Deleted {deleted_count} files."
+        if error_count > 0:
+            message += f" {error_count} errors occurred."
+        
+        # Send targeted deletion job to backend to remove DB rows
+        self.backend_job_queue.put(("delete_target_filepaths", {"filepath_list": filepaths}))
+        
+        # Remove deleted files from the results model to update the grid view
+        deleted_filepaths_set = set(filepaths)
+        new_results = []
+        for result in self.window.results_model.results_data:
+            _, filepath, _ = result
+            if filepath not in deleted_filepaths_set:
+                new_results.append(result)
+        
+        # Update the model with filtered results (excluding deleted files)
+        self.window.results_model.set_results(new_results)
+        
+        self.window.update_status_bar(message)
+        self.window.set_controls_enabled(True)
+
+    @Slot(bool)
+    def on_show_tagged_only_toggled(self, checked: bool):
+        """Filter results to show only tagged images."""
+        # Trigger a refresh with the tagged_only filter
+        self._tagged_only_filter = checked
+        
+        # Determine current search mode and re-trigger with filter
+        # For simplicity, we'll just trigger a random search with the filter
+        self.window.clear_results()
+        self.window.show_loading_state("Filtering..." if checked else "Loading all images...")
+        self.window.set_controls_enabled(False)
+        self.backend_job_queue.put(("random_search", {"tagged_only": checked}))

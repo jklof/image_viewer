@@ -98,11 +98,20 @@ class BackendWorker:
         logger.info("BackendWorker thread shutting down.")
 
     # --- Job Handlers ---
-    def handle_composite_search(self, query_elements: list):
+    def handle_composite_search(self, payload):
         try:
             if not self.db or not self.embedder:
                 return
-            logger.info(f"Performing composite search with {len(query_elements)} elements.")
+            
+            # Handle both list (legacy) and dict (new) formats
+            if isinstance(payload, dict):
+                query_elements = payload.get("query_elements", [])
+                tagged_only = payload.get("tagged_only", False)
+            else:
+                query_elements = payload
+                tagged_only = False
+            
+            logger.info(f"Performing composite search with {len(query_elements)} elements. tagged_only={tagged_only}")
             self.signals.status_update.emit(f"Building query from {len(query_elements)} elements...")
 
             combined_vector = np.zeros(self.embedder.embedding_shape, dtype=self.embedder.embedding_dtype)
@@ -150,6 +159,8 @@ class BackendWorker:
                 logger.info(f"Successfully processed {successful_elements}/{len(query_elements)} query elements.")
                 final_query_vector = combined_vector / norm
                 results = self.db._perform_search(final_query_vector, -1)
+                if tagged_only:
+                    results = [(s, f, t) for s, f, t in results if "marked" in t]
                 self.signals.results_ready.emit(results)
             else:
                 # All elements failed or resulted in zero vector
@@ -160,36 +171,42 @@ class BackendWorker:
                     logger.error(error_msg)
                     self.signals.error.emit(error_msg)
                     # Still show random results so the UI isn't empty
-                    self.handle_random_search(None)
+                    self.handle_random_search({"tagged_only": tagged_only})
                 else:
                     logger.warning("Composite query resulted in a zero vector. Falling back to random order.")
                     self.signals.status_update.emit("Query resulted in zero vector - showing random order")
-                    self.handle_random_search(None)
+                    self.handle_random_search({"tagged_only": tagged_only})
         except Exception:
             error_msg = traceback.format_exc()
             logger.error(f"--- AN ERROR OCCURRED DURING COMPOSITE SEARCH ---\n{error_msg}")
             self.signals.error.emit(error_msg)
 
-    def handle_random_search(self, _):
+    def handle_random_search(self, payload):
         try:
             if not self.db:
                 return
+            tagged_only = payload.get("tagged_only", False) if isinstance(payload, dict) else False
             self.signals.status_update.emit("Randomly ordering all images...")
-            filepaths = self.db.get_all_unique_filepaths()
-            random.shuffle(filepaths)
-            results = [(0.0, path) for path in filepaths]
+            filepaths_with_tags = self.db.get_all_unique_filepaths()
+            random.shuffle(filepaths_with_tags)
+            if tagged_only:
+                filepaths_with_tags = [(f, t) for f, t in filepaths_with_tags if "marked" in t]
+            results = [(0.0, path, tags) for path, tags in filepaths_with_tags]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
 
-    def handle_sort_by_date(self, _):
+    def handle_sort_by_date(self, payload):
         try:
             if not self.db:
                 return
+            tagged_only = payload.get("tagged_only", False) if isinstance(payload, dict) else False
             self.signals.status_update.emit("Sorting all images by date...")
-            files_with_mtime = self.db.get_all_filepaths_with_mtime()
-            files_with_mtime.sort(key=lambda x: x[1], reverse=True)
-            results = [(0.0, path) for path, mtime in files_with_mtime]
+            files_with_mtime_tags = self.db.get_all_filepaths_with_mtime()
+            files_with_mtime_tags.sort(key=lambda x: x[1], reverse=True)
+            if tagged_only:
+                files_with_mtime_tags = [(f, m, t) for f, m, t in files_with_mtime_tags if "marked" in t]
+            results = [(0.0, path, tags) for path, mtime, tags in files_with_mtime_tags]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
@@ -225,6 +242,39 @@ class BackendWorker:
             self.signals.status_update.emit("Reloading image data from database...")
             self.db._load_embeddings_into_memory()
             self.signals.reloaded.emit()
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def handle_toggle_tags(self, payload: dict):
+        try:
+            if not self.db:
+                return
+            sha256_list = payload.get("sha256_list", [])
+            tag_name = payload.get("tag_name", "marked")
+            if sha256_list:
+                self.db.toggle_tag(sha256_list, tag_name)
+                logger.info(f"Toggled tag '{tag_name}' for {len(sha256_list)} images.")
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def handle_untag_all(self, payload: dict):
+        try:
+            if not self.db:
+                return
+            tag_name = payload.get("tag_name", "marked")
+            self.db.untag_all(tag_name)
+            logger.info(f"Removed tag '{tag_name}' from all images.")
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def handle_delete_target_filepaths(self, payload: dict):
+        try:
+            if not self.db:
+                return
+            filepath_list = payload.get("filepath_list", [])
+            if filepath_list:
+                self.db.delete_target_filepaths(filepath_list)
+                logger.info(f"Deleted {len(filepath_list)} filepaths from database.")
         except Exception:
             logger.error(traceback.format_exc())
 

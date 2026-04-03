@@ -608,6 +608,10 @@ class MainWindow(QMainWindow):
     sync_cancel_triggered = Signal()
     preferences_saved = Signal(bool)
     closing = Signal()
+    toggle_tags_requested = Signal(list)
+    untag_all_requested = Signal()
+    move_tagged_requested = Signal()
+    delete_tagged_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -672,10 +676,38 @@ class MainWindow(QMainWindow):
         # --- SET ICON ---
         self.visualize_btn.setIcon(icons.create_icon(icons.SVG_CHART))
 
+        self.show_tagged_only_btn = QPushButton("Show Tagged Only")
+        self.show_tagged_only_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
+        self.show_tagged_only_btn.setToolTip("Show only tagged images.")
+        self.show_tagged_only_btn.setIcon(icons.create_icon(icons.SVG_TAG))
+        self.show_tagged_only_btn.setCheckable(True)
+
+        self.batch_actions_btn = QPushButton("Batch Actions")
+        self.batch_actions_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
+        self.batch_actions_btn.setToolTip("Batch operations for tagged images.")
+        self.batch_actions_btn.setIcon(icons.create_icon(icons.SVG_BATCH))
+        
+        batch_menu = QMenu(self)
+        untag_all_action = QAction("Untag All", self)
+        untag_all_action.triggered.connect(self.untag_all_requested.emit)
+        batch_menu.addAction(untag_all_action)
+        
+        move_tagged_action = QAction("Move Tagged Files", self)
+        move_tagged_action.triggered.connect(self.move_tagged_requested.emit)
+        batch_menu.addAction(move_tagged_action)
+        
+        delete_tagged_action = QAction("Delete Tagged Files", self)
+        delete_tagged_action.triggered.connect(self.delete_tagged_requested.emit)
+        batch_menu.addAction(delete_tagged_action)
+        
+        self.batch_actions_btn.setMenu(batch_menu)
+
         action_bar_layout.addWidget(self.random_order_btn)
         action_bar_layout.addWidget(self.sort_by_date_btn)
         action_bar_layout.addWidget(self.toggle_view_btn)
         action_bar_layout.addWidget(self.visualize_btn)
+        action_bar_layout.addWidget(self.show_tagged_only_btn)
+        action_bar_layout.addWidget(self.batch_actions_btn)
 
         action_bar_layout.addStretch()
 
@@ -918,6 +950,11 @@ class MainWindow(QMainWindow):
         add_pos_action = QAction("Add to Query (+)", self)
         add_pos_action.triggered.connect(lambda: self.query_builder.add_image_element(filepath))
         context_menu.addAction(add_pos_action)
+        
+        toggle_tag_action = QAction("Toggle Tag (T)", self)
+        toggle_tag_action.triggered.connect(self._toggle_tag_for_selection)
+        context_menu.addAction(toggle_tag_action)
+        
         context_menu.addSeparator()
         copy_path_action = QAction("Copy Full Path", self)
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(filepath))
@@ -940,7 +977,7 @@ class MainWindow(QMainWindow):
     def on_single_view_context_menu(self, pos: QPoint):
         if self.current_single_view_index < 0:
             return
-        _, filepath = self.results_model.results_data[self.current_single_view_index]
+        _, filepath, _ = self.results_model.results_data[self.current_single_view_index]
         context_menu = self._create_context_menu(filepath)
         context_menu.exec(self.single_image_view_widget.video_label.mapToGlobal(pos))
 
@@ -956,15 +993,15 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < total_count):
             return
 
-        _, current_filepath = self.results_model.results_data[self.current_single_view_index]
+        _, current_filepath, _ = self.results_model.results_data[self.current_single_view_index]
 
         prev_filepath = None
         if self.current_single_view_index > 0:
-            _, prev_filepath = self.results_model.results_data[self.current_single_view_index - 1]
+            _, prev_filepath, _ = self.results_model.results_data[self.current_single_view_index - 1]
 
         next_filepath = None
         if self.current_single_view_index < total_count - 1:
-            _, next_filepath = self.results_model.results_data[self.current_single_view_index + 1]
+            _, next_filepath, _ = self.results_model.results_data[self.current_single_view_index + 1]
 
         self.single_image_view_widget.set_media_data(current_filepath, prev_filepath, next_filepath)
 
@@ -1026,6 +1063,19 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap(filepath)
         if not pixmap.isNull():
             QApplication.clipboard().setPixmap(pixmap)
+
+    def _toggle_tag_for_selection(self):
+        """Toggle tag for currently selected items."""
+        selected_indexes = self.results_view.selectionModel().selectedIndexes()
+        if selected_indexes:
+            # Emit a signal that will be connected to the controller
+            self.toggle_tags_requested.emit(selected_indexes)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_T:
+            self._toggle_tag_for_selection()
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.single_image_view_widget.cleanup()

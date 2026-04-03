@@ -9,3 +9,4 @@ ITEM_HEIGHT = 210
 # These are used to retrieve specific data from the model.
 FILEPATH_ROLE = Qt.ItemDataRole.UserRole + 1
 SCORE_ROLE = Qt.ItemDataRole.UserRole + 2
+TAGS_ROLE = Qt.ItemDataRole.UserRole + 3

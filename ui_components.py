@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QListView
 from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QPen, QBrush
 from PySide6.QtCore import Qt, QSize, QRect, QTimer
 
-from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE
+from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
 
 
 def create_placeholder_pixmap() -> QPixmap:
@@ -58,6 +58,13 @@ class SearchResultDelegate(QStyledItemDelegate):
         self.bg_brush_normal = QBrush(QColor(40, 40, 40))
         self.bg_brush_hover = QBrush(QColor(85, 170, 255, 60))
         self.bg_brush_selected = QBrush(QColor(85, 170, 255, 120))
+        
+        # Pre-allocate tag badge brush and pen
+        self.tag_badge_brush = QBrush(QColor(255, 200, 0, 220))
+        self.tag_badge_pen = QPen(QColor(200, 150, 0))
+        self.tag_badge_font = QFont()
+        self.tag_badge_font.setBold(True)
+        self.tag_badge_font.setPointSize(12)
 
         self._size_hint = QSize(ITEM_WIDTH, ITEM_HEIGHT)
 
@@ -94,6 +101,22 @@ class SearchResultDelegate(QStyledItemDelegate):
         icon_y = item_rect.y() + self._thumbnail_top_margin + (THUMBNAIL_SIZE - pixmap.height()) // 2
 
         painter.drawPixmap(icon_x, icon_y, pixmap)
+
+        # Draw tag badge if image is tagged
+        is_tagged = index.data(TAGS_ROLE)
+        if is_tagged:
+            badge_size = 24
+            badge_x = item_rect.right() - badge_size - 5
+            badge_y = item_rect.y() + 5
+            
+            painter.setPen(self.tag_badge_pen)
+            painter.setBrush(self.tag_badge_brush)
+            painter.drawEllipse(badge_x, badge_y, badge_size, badge_size)
+            
+            painter.setFont(self.tag_badge_font)
+            painter.setPen(QColor(50, 50, 50))
+            star_rect = QRect(badge_x, badge_y, badge_size, badge_size)
+            painter.drawText(star_rect, Qt.AlignmentFlag.AlignCenter, "★")
 
         score = index.data(SCORE_ROLE)
         if isinstance(score, float) and score > 0:

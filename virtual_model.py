@@ -2,7 +2,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot, QMimeData,
 import logging
 import collections
 
-from constants import FILEPATH_ROLE, SCORE_ROLE
+from constants import FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
 from loader_manager import loader_manager, thumbnail_cache
 from ui_components import create_placeholder_pixmap
 
@@ -33,12 +33,14 @@ class ImageResultModel(QAbstractListModel):
         if row >= len(self.results_data):
             return None
 
-        score, filepath = self.results_data[row]
+        score, filepath, tags = self.results_data[row]
 
         if role == SCORE_ROLE:
             return score
         if role == FILEPATH_ROLE:
             return filepath
+        if role == TAGS_ROLE:
+            return "marked" in tags
 
         if role == Qt.ItemDataRole.DecorationRole:
             # 1. Fast Path: Check Cache
@@ -89,7 +91,7 @@ class ImageResultModel(QAbstractListModel):
         self.results_data = results
         # Map filepath to list of row indices to handle duplicate filepaths
         self._filepath_to_row_map = collections.defaultdict(list)
-        for i, (_, filepath) in enumerate(results):
+        for i, (_, filepath, _) in enumerate(results):
             self._filepath_to_row_map[filepath].append(i)
         self.endResetModel()
 
@@ -98,3 +100,18 @@ class ImageResultModel(QAbstractListModel):
         self.results_data = []
         self._filepath_to_row_map = collections.defaultdict(list)
         self.endResetModel()
+
+    def toggle_tag_for_rows(self, rows: list[int]):
+        """Optimistically update tags for specified rows and emit dataChanged."""
+        for row in rows:
+            if 0 <= row < len(self.results_data):
+                score, filepath, tags = self.results_data[row]
+                # Toggle the "marked" tag
+                if "marked" in tags:
+                    new_tags = tags.replace("marked", "").strip(",").strip()
+                else:
+                    new_tags = f"{tags},marked" if tags else "marked"
+                    new_tags = new_tags.strip(",").strip()
+                self.results_data[row] = (score, filepath, new_tags)
+                index = self.createIndex(row, 0)
+                self.dataChanged.emit(index, index, [TAGS_ROLE])
