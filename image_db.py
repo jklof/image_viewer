@@ -26,12 +26,16 @@ PIPELINE_QUEUE_SIZE = 256
 SQLITE_VARIABLE_LIMIT = 900
 MAX_IMAGE_PIXELS = 80 * 1000 * 1000
 PREPROCESS_TARGET_SIZE = (256, 256)  # Size for CLIP pre-processing
+INVALID_FILE_SENTINEL = "__INVALID__"  # Sentinel SHA for files that fail hashing/decoding
 
 
-def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[Path, str, float, bytes | None] | None:
+def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[Path, str, float, bytes | None]:
     """
     Worker to perform the hash AND pre-resize the image to bytes.
     Returns: (filepath, sha256, mtime, resized_image_bytes)
+    Now guarantees a return value unless a catastrophic process error occurs.
+    Files that fail hashing or decoding return the INVALID_FILE_SENTINEL so they
+    are tracked in the DB and skipped on subsequent syncs (no more retries).
     """
     try:
         # 1. Hashing
@@ -41,8 +45,9 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
             with open(filepath, "rb") as f:
                 while chunk := f.read(buffer_size):
                     sha256_hash.update(chunk)
-        except (IOError, OSError):
-            return None
+        except (IOError, OSError) as e:
+            logger.warning(f"Could not hash {filepath}: {e}")
+            return filepath, INVALID_FILE_SENTINEL, mtime, None
 
         file_hash = sha256_hash.hexdigest()
 
@@ -88,15 +93,20 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                     out_buffer = io.BytesIO()
                     img.save(out_buffer, format="JPEG", quality=90)
                     img_bytes = out_buffer.getvalue()
-        except Exception:
-            # If image load/resize fails, we still return the hash so DB tracks the file,
-            # but img_bytes is None so we skip embedding generation.
-            pass
+                else:
+                    # File exists but recognized format failed to decode
+                    return filepath, INVALID_FILE_SENTINEL, mtime, None
+        except Exception as e:
+            logger.warning(f"Decoding failed for {filepath}: {e}")
+            # Hashing worked, but it's not a valid image/video we can embed.
+            # Return sentinel so we don't try to embed it.
+            return filepath, INVALID_FILE_SENTINEL, mtime, None
 
         return filepath, file_hash, mtime, img_bytes
 
-    except Exception:
-        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error processing {filepath}: {e}")
+        return filepath, INVALID_FILE_SENTINEL, mtime, None
 
 
 class EmbeddingConsumerThread(threading.Thread):
@@ -184,8 +194,13 @@ class EmbeddingConsumerThread(threading.Thread):
             temp_valid_shas = []
 
             for sha, img_bytes in zip(shas, img_byte_list):
-                # Embed if: Not in DB, Image data exists, Not already queued
-                if sha not in existing_shas_in_db and img_bytes is not None and sha not in temp_valid_shas:
+                # Embed if: Not in DB, Image data exists, Not already queued, Not sentinel
+                if (
+                    sha != INVALID_FILE_SENTINEL
+                    and sha not in existing_shas_in_db
+                    and img_bytes is not None
+                    and sha not in temp_valid_shas
+                ):
                     try:
                         # Fast load from memory
                         img = Image.open(io.BytesIO(img_bytes))
@@ -208,12 +223,11 @@ class EmbeddingConsumerThread(threading.Thread):
                         "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)", new_embeddings_to_commit
                     )
 
-                safe_shas = existing_shas_in_db.union(valid_new_shas)
-                filepath_data = []
-
-                for fp, sha, mt in zip(filepaths, shas, mtimes):
-                    if sha in safe_shas:
-                        filepath_data.append((str(fp), sha, mt))
+                # POISON PILL FIX: Record ALL filepaths from the batch.
+                # - Valid files: point to their real embedding
+                # - Invalid files: point to the sentinel row (which always exists)
+                # This ensures the DB knows about every file, preventing re-processing on next sync.
+                filepath_data = [(str(fp), sha, mt) for fp, sha, mt in zip(filepaths, shas, mtimes)]
 
                 if filepath_data:
                     self.conn.executemany(
@@ -262,6 +276,14 @@ class ImageDatabase:
                 "CREATE TABLE IF NOT EXISTS visualization (sha256 TEXT PRIMARY KEY, coord_x REAL NOT NULL, coord_y REAL NOT NULL, cluster_id INTEGER NOT NULL, FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE)"
             )
             conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            
+            # --- POISON PILL: Insert sentinel for invalid files ---
+            # This satisfies the FK constraint for files that fail hashing/decoding.
+            # We use a minimal 1-byte blob as placeholder.
+            conn.execute(
+                "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)",
+                (INVALID_FILE_SENTINEL, b'\x00'),
+            )
 
     def _get_metadata(self, key: str) -> str | None:
         with self._get_db_connection() as conn:
@@ -419,7 +441,11 @@ class ImageDatabase:
     def _load_embeddings_into_memory(self):
         self._sha_to_path_map_cache = None
         with self._get_db_connection() as conn:
-            rows = conn.execute("SELECT sha256, embedding FROM embeddings").fetchall()
+            # Filter out the sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
+            rows = conn.execute(
+                "SELECT sha256, embedding FROM embeddings WHERE sha256 != ?",
+                (INVALID_FILE_SENTINEL,),
+            ).fetchall()
         if not rows:
             self._shas_in_order, self._embedding_matrix = [], None
             return
@@ -429,14 +455,24 @@ class ImageDatabase:
     def _cleanup_orphaned_embeddings(self):
         # --- OPTIMIZATION: Use NOT EXISTS and cleanup visualization too ---
         with self._get_db_connection() as conn:
+            # POISON PILL FIX: Preserve the sentinel row even if no invalid files reference it.
+            # The sentinel is needed for future invalid files to satisfy FK constraints.
             conn.execute(
-                "DELETE FROM embeddings WHERE NOT EXISTS (SELECT 1 FROM filepaths WHERE filepaths.sha256 = embeddings.sha256)"
+                "DELETE FROM embeddings WHERE NOT EXISTS (SELECT 1 FROM filepaths WHERE filepaths.sha256 = embeddings.sha256) AND sha256 != ?",
+                (INVALID_FILE_SENTINEL,),
             )
             # Also remove visualization entries that no longer have a corresponding embedding
             conn.execute("DELETE FROM visualization WHERE sha256 NOT IN (SELECT sha256 FROM embeddings)")
         # ------------------------------------------------------------------
 
     def _reconstruct_embedding(self, blob):
+        # Defensive check: verify buffer length matches expected embedding size
+        expected_bytes = np.dtype(self.embedder.embedding_dtype).itemsize * np.prod(self.embedder.embedding_shape)
+        if len(blob) != expected_bytes:
+            logger.warning(
+                f"Malformed embedding blob detected (size {len(blob)}, expected {expected_bytes}). Returning zero vector."
+            )
+            return np.zeros(self.embedder.embedding_shape, dtype=self.embedder.embedding_dtype)
         return np.frombuffer(blob, dtype=self.embedder.embedding_dtype).reshape(self.embedder.embedding_shape)
 
     def ensure_visualization_data(self, status_callback=None, check_cancelled_callback=None):
@@ -483,7 +519,8 @@ class ImageDatabase:
             # Pass 1: Train PCA on the data stream without loading all to RAM
             conn = self._get_db_connection()
             try:
-                cursor = conn.execute("SELECT embedding FROM embeddings")
+                # Exclude sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
+                cursor = conn.execute("SELECT embedding FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,))
                 try:
                     while True:
                         if check_cancelled_callback:
@@ -513,7 +550,11 @@ class ImageDatabase:
 
             conn = self._get_db_connection()
             try:
-                cursor = conn.execute("SELECT sha256, embedding FROM embeddings")
+                # Exclude sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
+                cursor = conn.execute(
+                    "SELECT sha256, embedding FROM embeddings WHERE sha256 != ?",
+                    (INVALID_FILE_SENTINEL,),
+                )
                 try:
                     while True:
                         if check_cancelled_callback:
@@ -615,6 +656,8 @@ class ImageDatabase:
 
         results = []
         for i in indices:
+            # Safe: _shas_in_order and _embedding_matrix are always in sync
+            # (both filtered from the same query excluding the sentinel)
             sha = self._shas_in_order[i]
             paths = self._sha_to_path_map_cache.get(sha)
             if paths:
@@ -637,11 +680,22 @@ class ImageDatabase:
 
     def get_all_unique_filepaths(self):
         with self._get_db_connection() as conn:
-            return [r[0] for r in conn.execute("SELECT MIN(filepath) FROM filepaths GROUP BY sha256").fetchall()]
+            # Exclude invalid files from the UI - they would show as broken/black thumbnails
+            return [
+                r[0]
+                for r in conn.execute(
+                    "SELECT MIN(filepath) FROM filepaths WHERE sha256 != ? GROUP BY sha256",
+                    (INVALID_FILE_SENTINEL,),
+                ).fetchall()
+            ]
 
     def get_all_filepaths_with_mtime(self):
         with self._get_db_connection() as conn:
-            return conn.execute("SELECT filepath, mtime FROM filepaths").fetchall()
+            # Exclude invalid files from the UI - they would show as broken/black thumbnails
+            return conn.execute(
+                "SELECT filepath, mtime FROM filepaths WHERE sha256 != ?",
+                (INVALID_FILE_SENTINEL,),
+            ).fetchall()
 
     def get_all_embeddings_with_shas(self):
         with self._get_db_connection() as conn:
