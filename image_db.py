@@ -10,7 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from typing import TYPE_CHECKING
 
@@ -107,6 +107,8 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                         img = Image.open(filepath)
 
                 if img is not None and (img.width * img.height) <= MAX_IMAGE_PIXELS:
+                    # Respect EXIF rotation before thumbnailing
+                    img = ImageOps.exif_transpose(img)
                     img = img.convert("RGB")
                     img.thumbnail(PREPROCESS_TARGET_SIZE, Image.Resampling.LANCZOS)
 
@@ -206,6 +208,7 @@ class EmbeddingConsumerThread(threading.Thread):
                 existing_shas_in_db.update(row[0] for row in cursor.fetchall())
 
             new_embeddings_to_commit = []
+            new_thumbnails_to_commit = []
             valid_new_shas = set()
 
             # Prepare images for embedding
@@ -225,6 +228,8 @@ class EmbeddingConsumerThread(threading.Thread):
                         img = Image.open(io.BytesIO(img_bytes))
                         pil_images.append(img)
                         temp_valid_shas.append(sha)
+                        # Store bytes for the database
+                        new_thumbnails_to_commit.append((sha, img_bytes))
                     except Exception:
                         pass
 
@@ -240,6 +245,12 @@ class EmbeddingConsumerThread(threading.Thread):
                 if new_embeddings_to_commit:
                     self.conn.executemany(
                         "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)", new_embeddings_to_commit
+                    )
+                
+                # Commit the thumbnails
+                if new_thumbnails_to_commit:
+                    self.conn.executemany(
+                        "INSERT OR IGNORE INTO thumbnails (sha256, image_data) VALUES (?, ?)", new_thumbnails_to_commit
                     )
 
                 # POISON PILL FIX: Record ALL filepaths from the batch.
@@ -272,6 +283,7 @@ class ImageDatabase:
         self._verify_model_compatibility()
         self._shas_in_order, self._embedding_matrix = [], None
         self._sha_to_path_map_cache = None
+        self._sha_to_tags_cache = None  # NEW: Cache tags in RAM for instant searches
         self._cancel_flag = threading.Event()
         self._load_embeddings_into_memory()
 
@@ -291,6 +303,11 @@ class ImageDatabase:
             # --- OPTIMIZATION: Index for Orphan Cleanup and Foreign Key checks ---
             conn.execute("CREATE INDEX IF NOT EXISTS idx_filepaths_sha256 ON filepaths(sha256)")
             # ---------------------------------------------------------------------
+
+            # --- NEW THUMBNAILS TABLE ---
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS thumbnails (sha256 TEXT PRIMARY KEY, image_data BLOB NOT NULL, FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE)"
+            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS visualization (sha256 TEXT PRIMARY KEY, coord_x REAL NOT NULL, coord_y REAL NOT NULL, cluster_id INTEGER NOT NULL, FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE)"
             )
@@ -486,6 +503,7 @@ class ImageDatabase:
 
     def _load_embeddings_into_memory(self):
         self._sha_to_path_map_cache = None
+        self._sha_to_tags_cache = None  # Invalidate tag cache on reload
         with self._get_db_connection() as conn:
             # Filter out the sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
             rows = conn.execute(
@@ -676,11 +694,18 @@ class ImageDatabase:
             # Optional: re-raise if you want the UI to show the error
             # raise e
 
-    def _build_sha_to_path_map(self):
+    # Rename _build_sha_to_path_map to _build_memory_caches and load tags too
+    def _build_memory_caches(self):
         self._sha_to_path_map_cache = defaultdict(list)
+        self._sha_to_tags_cache = {}
         with self._get_db_connection() as conn:
+            # 1. Build Filepath Cache
             for sha, path in conn.execute("SELECT sha256, filepath FROM filepaths").fetchall():
                 self._sha_to_path_map_cache[sha].append(path)
+            
+            # 2. Build Tag Cache
+            for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256").fetchall():
+                self._sha_to_tags_cache[sha] = tags
 
     def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[float, str, str]]:
         # --- OPTIMIZATION: Efficient Numpy Search ---
@@ -690,8 +715,9 @@ class ImageDatabase:
         query_embedding = query_embedding.astype(self.embedder.embedding_dtype).reshape(1, -1)
         similarities = np.dot(self._embedding_matrix, query_embedding.T).flatten()
 
-        if self._sha_to_path_map_cache is None:
-            self._build_sha_to_path_map()
+        # Build caches if they don't exist
+        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
+            self._build_memory_caches()
 
         if top_k != -1 and top_k < len(similarities):
             # Partial sort is faster than full sort
@@ -700,19 +726,13 @@ class ImageDatabase:
         else:
             indices = np.argsort(similarities)[::-1]
 
-        # Fetch ALL tags into a dictionary in a single lightning-fast query
-        sha_to_tags = {}
-        with self._get_db_connection() as conn:
-            for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256"):
-                sha_to_tags[sha] = tags
-
+        # Lookups are now instant RAM dictionary lookups. No SQLite execution needed!
         results = []
         for i in indices:
-            # Safe: _shas_in_order and _embedding_matrix are always in sync
             sha = self._shas_in_order[i]
             paths = self._sha_to_path_map_cache.get(sha)
             if paths:
-                tags = sha_to_tags.get(sha, "")
+                tags = self._sha_to_tags_cache.get(sha, "")
                 results.append((float(similarities[i]), paths[0], tags))
         return results
         # --------------------------------------------
@@ -731,29 +751,34 @@ class ImageDatabase:
         self._cancel_flag.set()
 
     def get_all_unique_filepaths(self):
-        with self._get_db_connection() as conn:
-            # Exclude invalid files. Use a correlated subquery for tags to avoid massive GROUP BY tables.
-            rows = conn.execute(
-                """SELECT MIN(filepath) as filepath, sha256, 
-                          (SELECT GROUP_CONCAT(tag_name) FROM tags WHERE sha256 = f.sha256) as tags
-                   FROM filepaths f
-                   WHERE sha256 != ?
-                   GROUP BY sha256""",
-                (INVALID_FILE_SENTINEL,),
-            ).fetchall()
-            return [(row[0], row[2] or "") for row in rows]
+        """Used for Random Search. Entirely DB-free and instant."""
+        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
+            self._build_memory_caches()
+            
+        results = []
+        for sha, paths in self._sha_to_path_map_cache.items():
+            if paths and sha != INVALID_FILE_SENTINEL:
+                tags = self._sha_to_tags_cache.get(sha, "")
+                results.append((paths[0], tags))
+        return results
 
     def get_all_filepaths_with_mtime(self):
+        """Used for Sort By Date. Fetches mtime, maps tags via RAM."""
+        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
+            self._build_memory_caches()
+
+        # Fast query: no GROUP BY, no tag joins.
         with self._get_db_connection() as conn:
-            # Correlated subquery is much faster here than LEFT JOIN + GROUP BY
             rows = conn.execute(
-                """SELECT filepath, mtime, 
-                          (SELECT GROUP_CONCAT(tag_name) FROM tags WHERE sha256 = f.sha256) as tags
-                   FROM filepaths f
-                   WHERE sha256 != ?""",
-                (INVALID_FILE_SENTINEL,),
+                "SELECT filepath, sha256, mtime FROM filepaths WHERE sha256 != ?", 
+                (INVALID_FILE_SENTINEL,)
             ).fetchall()
-            return [(row[0], row[1], row[2] or "") for row in rows]
+            
+        results = []
+        for filepath, sha, mtime in rows:
+            tags = self._sha_to_tags_cache.get(sha, "")
+            results.append((filepath, mtime, tags))
+        return results
 
     def _get_sha256_for_filepaths(self, filepath_list: list[str]) -> list[str]:
         """Convert filepaths to their corresponding SHA256 hashes."""
@@ -773,14 +798,11 @@ class ImageDatabase:
         return sha256_list
 
     def toggle_tag(self, filepath_or_sha_list: list[str], tag_name: str = "marked"):
-        """Toggle a tag for a list of filepaths or SHA256 hashes."""
         if not filepath_or_sha_list:
             return
         
-        # Convert filepaths to SHA256 if needed
         sha256_list = self._get_sha256_for_filepaths(filepath_or_sha_list)
         if not sha256_list:
-            logger.warning("No valid SHA256 hashes found for the provided filepaths")
             return
         
         with self._get_db_connection() as conn:
@@ -788,30 +810,27 @@ class ImageDatabase:
                 chunk = sha256_list[i:i + SQLITE_VARIABLE_LIMIT]
                 placeholders = ", ".join("?" for _ in chunk)
                 
-                # Find which SHAs already have this tag
                 cursor = conn.execute(
                     f"SELECT sha256 FROM tags WHERE sha256 IN ({placeholders}) AND tag_name = ?",
                     chunk + [tag_name]
                 )
                 tagged_shas = {row[0] for row in cursor.fetchall()}
                 
-                # Toggle: remove if tagged, add if not
                 for sha in chunk:
                     if sha in tagged_shas:
-                        conn.execute(
-                            "DELETE FROM tags WHERE sha256 = ? AND tag_name = ?",
-                            (sha, tag_name)
-                        )
+                        conn.execute("DELETE FROM tags WHERE sha256 = ? AND tag_name = ?", (sha, tag_name))
                     else:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)",
-                            (sha, tag_name)
-                        )
+                        conn.execute("INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", (sha, tag_name))
+        
+        # INVALIDATE CACHE so it rebuilds on next search
+        self._sha_to_tags_cache = None
 
     def untag_all(self, tag_name: str = "marked"):
-        """Remove a specific tag from all images."""
         with self._get_db_connection() as conn:
             conn.execute("DELETE FROM tags WHERE tag_name = ?", (tag_name,))
+        
+        # INVALIDATE CACHE
+        self._sha_to_tags_cache = None
 
     def delete_target_filepaths(self, filepath_list: list[str]):
         """Delete specific filepaths from the database without full sync."""
@@ -826,6 +845,11 @@ class ImageDatabase:
         
         # Clean up orphaned embeddings after deletion
         self._cleanup_orphaned_embeddings()
+
+        # Invalidate caches so deleted files disappear from subsequent searches/sorts
+        self._sha_to_path_map_cache = None
+        self._sha_to_tags_cache = None
+
 
     def get_all_embeddings_with_shas(self):
         with self._get_db_connection() as conn:
@@ -849,5 +873,6 @@ class ImageDatabase:
         self._embedding_matrix = None
         self._shas_in_order = []
         self._sha_to_path_map_cache = None
+        self._sha_to_tags_cache = None # Clear tag cache
         self._cancel_flag.set()
         logger.info("ImageDatabase closed.")
