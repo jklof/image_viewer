@@ -73,6 +73,10 @@ class ImageEmbedder:
     def offload(self):
         """Moves the model back to RAM and clears GPU cache."""
         with self.lock:
+            # Prevent race condition if unload() was called just as the timer fired
+            if self.model is None:
+                return
+                
             if not self.is_offloaded and self.compute_device != "cpu":
                 logger.info(f"Model idle for {self.idle_timeout}s. Offloading to RAM...")
                 self.model.to("cpu")
@@ -144,23 +148,24 @@ class ImageEmbedder:
         Release model resources and free GPU memory.
         Call this before destroying the embedder or when switching models.
         """
-        if self.timer is not None:
-            self.timer.cancel()
-            self.timer = None
-            
-        import torch
+        with self.lock:
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+                
+            import torch
 
-        if self.model is not None:
-            del self.model
-            self.model = None
-        if self.processor is not None:
-            del self.processor
-            self.processor = None
+            if self.model is not None:
+                del self.model
+                self.model = None
+            if self.processor is not None:
+                del self.processor
+                self.processor = None
 
-        if self.compute_device == "cuda":
-            torch.cuda.empty_cache()
-            logger.info("GPU cache cleared.")
-        elif self.compute_device == "mps":
-            torch.mps.empty_cache()
+            if self.compute_device == "cuda":
+                torch.cuda.empty_cache()
+                logger.info("GPU cache cleared.")
+            elif self.compute_device == "mps":
+                torch.mps.empty_cache()
 
-        logger.info("ImageEmbedder unloaded.")
+            logger.info("ImageEmbedder unloaded.")
