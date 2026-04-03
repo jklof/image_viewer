@@ -28,6 +28,10 @@ class AppController(QObject):
 
     # Signal to indicate when preferences are saved
     preferences_saved = Signal(bool)
+    
+    # Signals for background thread UI updates
+    move_completed = Signal(str)
+    delete_completed = Signal(list, str)
 
     def __init__(self, main_window: "MainWindow", use_cpu_only: bool = False):
         super().__init__()
@@ -60,6 +64,10 @@ class AppController(QObject):
 
     def _connect_signals(self):
         """Connects signals from the view and backend to the controller's slots."""
+        # Connect internal controller signals
+        self.move_completed.connect(self._on_move_completed)
+        self.delete_completed.connect(self._on_delete_completed)
+        
         # View to Controller
         self.window.composite_search_triggered.connect(self.on_composite_search_requested)
         self.window.visualization_triggered.connect(self.on_visualization_requested)
@@ -441,6 +449,11 @@ class AppController(QObject):
         )
         move_thread.start()
 
+    @Slot(str)
+    def _on_move_completed(self, message: str):
+        self.on_sync_requested()
+        self.window.update_status_bar(message)
+
     def _move_files_thread(self, filepaths: list[str], destination: str):
         """Thread function to move files with collision handling."""
         moved_count = 0
@@ -472,9 +485,8 @@ class AppController(QObject):
         if error_count > 0:
             message += f" {error_count} errors occurred."
         
-        # Trigger sync to reconcile DB
-        self.on_sync_requested()
-        self.window.update_status_bar(message)
+        # Emit signal to safely update UI from main thread
+        self.move_completed.emit(message)
 
     @Slot()
     def on_delete_tagged_requested(self):
@@ -514,6 +526,12 @@ class AppController(QObject):
         )
         delete_thread.start()
 
+    @Slot(list, str)
+    def _on_delete_completed(self, new_results: list, message: str):
+        self.window.results_model.set_results(new_results)
+        self.window.update_status_bar(message)
+        self.window.set_controls_enabled(True)
+
     def _delete_files_thread(self, filepaths: list[str]):
         """Thread function to delete files."""
         deleted_count = 0
@@ -543,11 +561,8 @@ class AppController(QObject):
             if filepath not in deleted_filepaths_set:
                 new_results.append(result)
         
-        # Update the model with filtered results (excluding deleted files)
-        self.window.results_model.set_results(new_results)
-        
-        self.window.update_status_bar(message)
-        self.window.set_controls_enabled(True)
+        # Emit signal to safely update UI from main thread
+        self.delete_completed.emit(new_results, message)
 
     @Slot(bool)
     def on_show_tagged_only_toggled(self, checked: bool):
