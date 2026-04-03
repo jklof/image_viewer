@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-HASHING_WORKER_COUNT = max(1, os.cpu_count() // 2)
+# Limit workers to prevent severe disk thrashing on mechanical HDDs
+HASHING_WORKER_COUNT = min(4, os.cpu_count() or 4)
 EMBEDDING_BATCH_SIZE = 64
 PIPELINE_QUEUE_SIZE = 256
 SQLITE_VARIABLE_LIMIT = 900
@@ -28,38 +29,57 @@ MAX_IMAGE_PIXELS = 80 * 1000 * 1000
 PREPROCESS_TARGET_SIZE = (256, 256)  # Size for CLIP pre-processing
 INVALID_FILE_SENTINEL = "__INVALID__"  # Sentinel SHA for files that fail hashing/decoding
 
+_WORKER_KNOWN_SHAS = set()
+
+def _init_worker(known_shas: set):
+    """Initializes the global state for the ProcessPoolExecutor workers."""
+    global _WORKER_KNOWN_SHAS
+    _WORKER_KNOWN_SHAS = known_shas
+
 
 def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[Path, str, float, bytes | None]:
     """
     Worker to perform the hash AND pre-resize the image to bytes.
-    Returns: (filepath, sha256, mtime, resized_image_bytes)
-    Now guarantees a return value unless a catastrophic process error occurs.
-    Files that fail hashing or decoding return the INVALID_FILE_SENTINEL so they
-    are tracked in the DB and skipped on subsequent syncs (no more retries).
+    Optimized to read files into memory once to avoid double I/O penalties on slow drives,
+    and skips image decoding entirely if the hash is already known.
     """
     try:
-        # 1. Hashing
+        ext = filepath.suffix.lower()
+        
+        # 1. Hashing & Buffering
         sha256_hash = hashlib.sha256()
-        buffer_size = 1024 * 1024
+        file_buffer = None
+        
         try:
-            with open(filepath, "rb") as f:
-                while chunk := f.read(buffer_size):
-                    sha256_hash.update(chunk)
+            file_size = filepath.stat().st_size
+            # For standard images under 50MB, read entirely into memory ONCE to avoid double reads.
+            if ext in (".jpg", ".jpeg", ".png", ".webp") and file_size < 50 * 1024 * 1024:
+                with open(filepath, "rb") as f:
+                    file_buffer = f.read()
+                sha256_hash.update(file_buffer)
+            else:
+                # For videos or massive files, stream in 8MB chunks for better sequential HDD throughput
+                buffer_size = 8 * 1024 * 1024
+                with open(filepath, "rb") as f:
+                    while chunk := f.read(buffer_size):
+                        sha256_hash.update(chunk)
         except (IOError, OSError) as e:
-            logger.warning(f"Could not hash {filepath}: {e}")
+            logger.warning(f"Could not read {filepath}: {e}")
             return filepath, INVALID_FILE_SENTINEL, mtime, None
 
         file_hash = sha256_hash.hexdigest()
 
-        # 2. Pre-processing (Resize in parallel process to save main thread CPU)
+        # FAST PATH: If the database already knows this hash, skip PIL decoding completely!
+        if file_hash in _WORKER_KNOWN_SHAS:
+            return filepath, file_hash, mtime, None
+
+        # 2. Pre-processing (Resize in parallel process)
         img_bytes = None
         try:
-            ext = filepath.suffix.lower()
             if ext in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
                 img = None
                 if ext == ".mp4":
                     import cv2
-
                     # Extract frame using OpenCV (max 6 seconds in to avoid long decode times)
                     cap = cv2.VideoCapture(str(filepath))
                     if cap.isOpened():
@@ -71,25 +91,26 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                         target_frame = total_frames // 2
                         six_seconds_frames = int(fps * 6)
 
-                        # Use 6 seconds or half the video, whichever is shorter
                         seek_frame = min(target_frame, six_seconds_frames)
-
                         cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, seek_frame))
                         ret, frame = cap.read()
                         if ret:
-                            # Convert BGR to RGB
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             img = Image.fromarray(frame)
                     cap.release()
                 else:
-                    img = Image.open(filepath)
+                    # USE MEMORY BUFFER instead of opening from disk a second time
+                    if file_buffer:
+                        import io
+                        img = Image.open(io.BytesIO(file_buffer))
+                    else:
+                        img = Image.open(filepath)
 
                 if img is not None and (img.width * img.height) <= MAX_IMAGE_PIXELS:
                     img = img.convert("RGB")
-                    # Resize now. This is CPU intensive, perfect for the worker pool.
                     img.thumbnail(PREPROCESS_TARGET_SIZE, Image.Resampling.LANCZOS)
 
-                    # Save to bytes to pass over process boundary
+                    import io
                     out_buffer = io.BytesIO()
                     img.save(out_buffer, format="JPEG", quality=90)
                     img_bytes = out_buffer.getvalue()
@@ -98,8 +119,6 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                     return filepath, INVALID_FILE_SENTINEL, mtime, None
         except Exception as e:
             logger.warning(f"Decoding failed for {filepath}: {e}")
-            # Hashing worked, but it's not a valid image/video we can embed.
-            # Return sentinel so we don't try to embed it.
             return filepath, INVALID_FILE_SENTINEL, mtime, None
 
         return filepath, file_hash, mtime, img_bytes
@@ -306,7 +325,15 @@ class ImageDatabase:
             if self._cancel_flag.is_set():
                 raise self.InterruptedError("Sync cancelled.")
 
-        executor = concurrent.futures.ProcessPoolExecutor(max_workers=HASHING_WORKER_COUNT)
+        # Fetch existing SHAs to pass to workers for the fast-path check
+        with self._get_db_connection() as conn:
+            existing_shas = {row[0] for row in conn.execute("SELECT sha256 FROM embeddings").fetchall()}
+
+        executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=HASHING_WORKER_COUNT,
+            initializer=_init_worker,
+            initargs=(existing_shas,)
+        )
         try:
             logger.info("Starting database synchronization...")
             self._reconcile_model_id()
@@ -410,11 +437,17 @@ class ImageDatabase:
         consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder, self._cancel_flag)
         consumer.start()
 
-        job_args = [(Path(p), disk_files[p]) for p in paths_to_hash]
+        # Sort paths alphabetically to roughly group files by directory.
+        # This drastically reduces seek times on mechanical spinning hard drives.
+        sorted_paths = sorted(list(paths_to_hash))
+        job_args = [(Path(p), disk_files[p]) for p in sorted_paths]
         completed = 0
         try:
-            # Use the new Worker that returns 4 items
-            results = executor.map(_targeted_hashing_and_resize_worker, *(zip(*job_args)))
+            # Force a tiny chunksize.
+            # By default, Python divides the list into massive chunks, causing concurrent workers
+            # to read from completely different alphabetical sections of the disk.
+            # A chunksize of 4 forces workers to process adjacent files, respecting the sort order.
+            results = executor.map(_targeted_hashing_and_resize_worker, *(zip(*job_args)), chunksize=4)
             for result in results:
                 check_cancelled()
                 if result:
