@@ -545,14 +545,20 @@ class ImageDatabase:
         to optimize for speed and memory usage on large datasets.
         """
         try:
-            # 1. Check if update is needed (Same as before)
+            # 1. Check if update is needed
             with self._get_db_connection() as conn:
-                emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+                # Exclude the sentinel from the embedding count
+                emb_count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)).fetchone()[0]
                 vis_count = conn.execute("SELECT COUNT(*) FROM visualization").fetchone()[0]
+                
+                # Fast check: Is there ANY valid embedding missing from the visualization table?
+                missing_vis = conn.execute(
+                    "SELECT 1 FROM embeddings e WHERE e.sha256 != ? AND NOT EXISTS (SELECT 1 FROM visualization v WHERE v.sha256 = e.sha256) LIMIT 1",
+                    (INVALID_FILE_SENTINEL,)
+                ).fetchone()
 
-            # Simple check: if counts match, we assume we are good.
-            # (Robustness improvement: check specific SHAs if you prefer strictness)
-            if emb_count > 0 and emb_count == vis_count:
+            # If counts match AND no embeddings are missing, we are 100% up to date.
+            if emb_count > 0 and emb_count == vis_count and missing_vis is None:
                 return
 
             if check_cancelled_callback:
