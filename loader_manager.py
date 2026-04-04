@@ -1,6 +1,7 @@
 import collections
 import logging
 import threading
+import sqlite3
 
 import cv2
 import numpy as np
@@ -16,13 +17,41 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QPixmap, QImage, QColor
 from ui_components import THUMBNAIL_SIZE
+from config_utils import get_db_path
 
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-THUMBNAIL_CACHE_SIZE = 2000
+THUMBNAIL_CACHE_SIZE = 5000  # Increased to prevent thrashing on large scroll views
 # High worker count is safe here; Condition variables prevent CPU busy loops
 NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
+
+# Thread-local storage for SQLite connections so QThreadPool workers don't block each other
+_thread_local = threading.local()
+
+def get_thread_local_db():
+    current_db_path = get_db_path()
+    
+    # Create or update connection if missing, or if user changed DB path in preferences
+    if getattr(_thread_local, "db_path", None) != current_db_path:
+        if hasattr(_thread_local, "conn"):
+            try:
+                _thread_local.conn.close()
+            except Exception:
+                pass
+        
+        # Connect in read-only mode using URI. This guarantees the UI thread 
+        # can NEVER block the background sync worker with write locks.
+        try:
+            conn = sqlite3.connect(f"file:{current_db_path}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.OperationalError:
+            # Fallback if URI fails or DB doesn't exist yet
+            conn = sqlite3.connect(current_db_path, timeout=5.0)
+            
+        _thread_local.conn = conn
+        _thread_local.db_path = current_db_path
+        
+    return _thread_local.conn
 
 
 class LRUThumbnailCache:
@@ -65,29 +94,47 @@ class LoadThumbnailTask(QRunnable):
             return
 
         try:
-            # 1. Fast path cache check
+            # 1. Fast path memory cache check
             if thumbnail_cache.get(self.filepath):
                 return
 
             ext = self.filepath.lower()
             image = QImage()
+            image_loaded_from_db = False
 
-            if ext.endswith(".mp4"):
-                cap = cv2.VideoCapture(self.filepath)
-                if cap.isOpened():
-                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
-                    ret, frame = cap.read()
-                    if ret:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        h, w, ch = frame.shape
-                        bytes_per_line = ch * w
-                        tmp_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                        image = tmp_img.copy()
-                cap.release()
-            else:
-                image = QImage(self.filepath)
+            # 2. Try the Database first (Orders of magnitude faster than full disk decode)
+            try:
+                conn = get_thread_local_db()
+                cursor = conn.execute(
+                    "SELECT t.image_data FROM thumbnails t JOIN filepaths f ON t.sha256 = f.sha256 WHERE f.filepath = ?",
+                    (self.filepath,)
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    if image.loadFromData(row[0]):
+                        image_loaded_from_db = True
+            except Exception as e:
+                logger.debug(f"DB thumbnail load failed for {self.filepath}, falling back to disk: {e}")
 
+            # 3. Fallback to Disk (Only happens if file isn't in DB yet, or DB read fails)
+            if not image_loaded_from_db:
+                if ext.endswith(".mp4"):
+                    cap = cv2.VideoCapture(self.filepath)
+                    if cap.isOpened():
+                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
+                        ret, frame = cap.read()
+                        if ret:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            h, w, ch = frame.shape
+                            bytes_per_line = ch * w
+                            tmp_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                            image = tmp_img.copy()
+                    cap.release()
+                else:
+                    image = QImage(self.filepath)
+
+            # 4. Scale down and format for the UI
             if not image.isNull():
                 if image.width() > THUMBNAIL_SIZE or image.height() > THUMBNAIL_SIZE:
                     image = image.scaled(
