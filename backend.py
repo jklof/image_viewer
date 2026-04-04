@@ -19,6 +19,7 @@ class BackendSignals(QObject):
     """Holds signals that the backend worker thread can emit."""
 
     error = Signal(str)
+    warning = Signal(str)
     initialized = Signal()
     reloaded = Signal()
     results_ready = Signal(list)
@@ -169,9 +170,9 @@ class BackendWorker:
                     error_msg = (
                         f"All {len(query_elements)} query element(s) failed to load or process. Cannot perform search."
                     )
-                    logger.error(error_msg)
-                    self.signals.error.emit(error_msg)
-                    # Still show random results so the UI isn't empty
+                    logger.warning(error_msg)
+                    self.signals.warning.emit(error_msg)
+                    # Safely load random results to clear the loading UI spinner
                     self.handle_random_search({"tagged_only": tagged_only})
                 else:
                     logger.warning("Composite query resulted in a zero vector. Falling back to random order.")

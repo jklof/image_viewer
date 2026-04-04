@@ -83,6 +83,7 @@ class AppController(QObject):
         # Backend Signals to Controller Slots
         self.backend_signals.initialized.connect(self.on_backend_initialized)
         self.backend_signals.error.connect(self.on_backend_error)
+        self.backend_signals.warning.connect(self.on_backend_warning)
         self.backend_signals.results_ready.connect(self.on_results_ready)
         self.backend_signals.status_update.connect(self.window.update_status_bar)
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
@@ -174,6 +175,7 @@ class AppController(QObject):
         try:
             old_signals.initialized.disconnect(self.on_backend_initialized)
             old_signals.error.disconnect(self.on_backend_error)
+            old_signals.warning.disconnect(self.on_backend_warning)
             old_signals.results_ready.disconnect(self.on_results_ready)
             old_signals.status_update.disconnect(self.window.update_status_bar)
             old_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
@@ -185,6 +187,7 @@ class AppController(QObject):
         # Reconnect backend signals
         self.backend_signals.initialized.connect(self.on_backend_initialized)
         self.backend_signals.error.connect(self.on_backend_error)
+        self.backend_signals.warning.connect(self.on_backend_warning)
         self.backend_signals.results_ready.connect(self.on_results_ready)
         self.backend_signals.status_update.connect(self.window.update_status_bar)
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
@@ -200,6 +203,12 @@ class AppController(QObject):
         self.window.show_critical_error_state()
         self.window.update_status_bar("Backend failed. Please restart.")
         self.window.show_critical_error("Backend Error", f"A critical error occurred: {error_message}")
+
+    @Slot(str)
+    def on_backend_warning(self, message: str):
+        """Displays a non-fatal warning to the user without locking the UI."""
+        self.window.update_status_bar(message)
+        QMessageBox.warning(self.window, "Search Failed", message)
 
     @Slot(list)
     def on_composite_search_requested(self, query_elements: list):
