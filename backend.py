@@ -24,6 +24,7 @@ class BackendSignals(QObject):
     results_ready = Signal(list)
     status_update = Signal(str)
     visualization_data_ready = Signal(list)
+    tag_operation_failed = Signal(list)
 
 
 class BackendWorker:
@@ -246,16 +247,19 @@ class BackendWorker:
             logger.error(traceback.format_exc())
 
     def handle_toggle_tags(self, payload: dict):
+        # Note: The UI passes filepaths into 'sha256_list'
+        filepaths = payload.get("sha256_list", [])
+        tag_name = payload.get("tag_name", "marked")
         try:
             if not self.db:
                 return
-            sha256_list = payload.get("sha256_list", [])
-            tag_name = payload.get("tag_name", "marked")
-            if sha256_list:
-                self.db.toggle_tag(sha256_list, tag_name)
-                logger.info(f"Toggled tag '{tag_name}' for {len(sha256_list)} images.")
+            if filepaths:
+                self.db.toggle_tag(filepaths, tag_name)
+                logger.info(f"Toggled tag '{tag_name}' for {len(filepaths)} images.")
         except Exception:
             logger.error(traceback.format_exc())
+            # Emit the failed filepaths back to the UI for rollback
+            self.signals.tag_operation_failed.emit(filepaths)
 
     def handle_untag_all(self, payload: dict):
         try:

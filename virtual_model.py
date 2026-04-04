@@ -101,17 +101,24 @@ class ImageResultModel(QAbstractListModel):
         self._filepath_to_row_map = collections.defaultdict(list)
         self.endResetModel()
 
-    def toggle_tag_for_rows(self, rows: list[int]):
-        """Optimistically update tags for specified rows and emit dataChanged."""
-        for row in rows:
-            if 0 <= row < len(self.results_data):
-                score, filepath, tags = self.results_data[row]
-                # Toggle the "marked" tag
-                if "marked" in tags:
-                    new_tags = tags.replace("marked", "").strip(",").strip()
-                else:
-                    new_tags = f"{tags},marked" if tags else "marked"
-                    new_tags = new_tags.strip(",").strip()
-                self.results_data[row] = (score, filepath, new_tags)
-                index = self.createIndex(row, 0)
-                self.dataChanged.emit(index, index, [TAGS_ROLE])
+    def toggle_tag_for_filepaths(self, filepaths: list[str]):
+        """Optimistically update tags for specified filepaths, regardless of current sort order."""
+        for filepath in filepaths:
+            # Use the cache to find the current valid row(s) for this filepath
+            rows = self._filepath_to_row_map.get(filepath, [])
+            for row in rows:
+                if 0 <= row < len(self.results_data):
+                    score, fp, tags = self.results_data[row]
+                    
+                    # Convert to set for safer manipulation (Also fixes Issue #6)
+                    tag_set = set(tags.split(",")) if tags else set()
+                    if "marked" in tag_set:
+                        tag_set.discard("marked")
+                    else:
+                        tag_set.add("marked")
+                    
+                    new_tags = ",".join(filter(None, tag_set))
+                    
+                    self.results_data[row] = (score, fp, new_tags)
+                    index = self.createIndex(row, 0)
+                    self.dataChanged.emit(index, index, [TAGS_ROLE])

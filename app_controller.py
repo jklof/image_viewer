@@ -87,6 +87,7 @@ class AppController(QObject):
         self.backend_signals.status_update.connect(self.window.update_status_bar)
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
+        self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
 
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
@@ -177,7 +178,8 @@ class AppController(QObject):
             old_signals.status_update.disconnect(self.window.update_status_bar)
             old_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
             old_signals.reloaded.disconnect(self.on_backend_reloaded)
-        except RuntimeError:
+            old_signals.tag_operation_failed.disconnect(self.on_tag_operation_failed)
+        except (RuntimeError, AttributeError):
             pass  # Ignore disconnection errors
 
         # Reconnect backend signals
@@ -187,6 +189,7 @@ class AppController(QObject):
         self.backend_signals.status_update.connect(self.window.update_status_bar)
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
+        self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
 
     @Slot()
     def on_backend_initialized(self):
@@ -354,29 +357,36 @@ class AppController(QObject):
 
     @Slot(list)
     def on_toggle_tags_requested(self, indices: list):
-        """Optimistically toggle tags for selected images."""
+        """Optimistically toggle tags for selected images using filepaths."""
         if self.sync_thread and self.sync_thread.isRunning():
             self.window.update_status_bar("Cannot toggle tags while sync is running.")
             return
-            
+
         if not indices:
             return
         
-        # Optimistically update UI first
-        self.window.results_model.toggle_tag_for_rows([idx.row() for idx in indices])
-        
-        # Extract SHA256 hashes for the selected items
-        sha256_list = []
+        # Extract filepaths for the selected items
+        filepaths = []
         for index in indices:
             row = index.row()
             if 0 <= row < len(self.window.results_model.results_data):
                 _, filepath, _ = self.window.results_model.results_data[row]
-                # We need to get the SHA256 from the backend
-                # For now, we'll use filepath as a proxy
-                sha256_list.append(filepath)
+                filepaths.append(filepath)
         
-        # Dispatch job to backend (filepath will be converted to SHA256 there)
-        self.backend_job_queue.put(("toggle_tags", {"sha256_list": sha256_list, "tag_name": "marked"}))
+        if not filepaths:
+            return
+
+        # 1. Optimistically update UI via filepaths (safe from row shifting)
+        self.window.results_model.toggle_tag_for_filepaths(filepaths)
+        
+        # 2. Dispatch job to backend
+        self.backend_job_queue.put(("toggle_tags", {"sha256_list": filepaths, "tag_name": "marked"}))
+
+    @Slot(list)
+    def on_tag_operation_failed(self, filepaths: list):
+        self.window.update_status_bar("Database error: Failed to toggle tags. Rolling back.")
+        # Toggling them a second time reverts the optimistic UI update
+        self.window.results_model.toggle_tag_for_filepaths(filepaths)
 
     @Slot()
     def on_untag_all_requested(self):
