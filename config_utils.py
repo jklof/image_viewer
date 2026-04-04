@@ -21,10 +21,10 @@ _CONFIG_CACHE = None
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, force_reload: bool = False) -> dict:
     """Loads the configuration from a YAML file, applying defaults for missing keys."""
     global _CONFIG_CACHE
-    
+
     if _CONFIG_CACHE is not None and not force_reload:
         return _CONFIG_CACHE.copy()
-        
+
     try:
         with open(config_path, "r") as f:
             user_config = yaml.safe_load(f)

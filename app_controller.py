@@ -28,7 +28,7 @@ class AppController(QObject):
 
     # Signal to indicate when preferences are saved
     preferences_saved = Signal(bool)
-    
+
     # Signals for background thread UI updates
     move_completed = Signal(str)
     delete_completed = Signal(list, str)
@@ -67,7 +67,7 @@ class AppController(QObject):
         # Connect internal controller signals
         self.move_completed.connect(self._on_move_completed)
         self.delete_completed.connect(self._on_delete_completed)
-        
+
         # View to Controller
         self.window.composite_search_triggered.connect(self.on_composite_search_requested)
         self.window.visualization_triggered.connect(self.on_visualization_requested)
@@ -93,7 +93,7 @@ class AppController(QObject):
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
         self.window.visualizer_widget.status_update.connect(self.window.update_status_bar)
-        
+
         # Tagging signals
         self.window.toggle_tags_requested.connect(self.on_toggle_tags_requested)
         self.window.untag_all_requested.connect(self.on_untag_all_requested)
@@ -130,7 +130,7 @@ class AppController(QObject):
 
         # Store old signals before reassignment
         old_signals = self.backend_signals
-        
+
         # Disconnect old signals immediately BEFORE shutting down thread to prevent race conditions
         self._disconnect_backend_signals(old_signals)
 
@@ -217,10 +217,7 @@ class AppController(QObject):
         self.window.show_loading_state("Constructing query...")
         self.window.set_controls_enabled(False)
         # Wrap payload in dict to include the filter state
-        payload = {
-            "query_elements": query_elements,
-            "tagged_only": self._tagged_only_filter
-        }
+        payload = {"query_elements": query_elements, "tagged_only": self._tagged_only_filter}
         self.backend_job_queue.put(("composite_search", payload))
 
     @Slot()
@@ -374,7 +371,7 @@ class AppController(QObject):
 
         if not indices:
             return
-        
+
         # Extract filepaths for the selected items
         filepaths = []
         for index in indices:
@@ -382,13 +379,13 @@ class AppController(QObject):
             if 0 <= row < len(self.window.results_model.results_data):
                 _, filepath, _ = self.window.results_model.results_data[row]
                 filepaths.append(filepath)
-        
+
         if not filepaths:
             return
 
         # 1. Optimistically update UI via filepaths (safe from row shifting)
         self.window.results_model.toggle_tag_for_filepaths(filepaths)
-        
+
         # 2. Dispatch job to backend
         self.backend_job_queue.put(("toggle_tags", {"filepath_list": filepaths, "tag_name": "marked"}))
 
@@ -402,7 +399,9 @@ class AppController(QObject):
     def on_untag_all_requested(self):
         """Remove all tags from all images."""
         if self.sync_thread and self.sync_thread.isRunning():
-            QMessageBox.warning(self.window, "Sync in Progress", "Cannot modify tags while a background sync is running.")
+            QMessageBox.warning(
+                self.window, "Sync in Progress", "Cannot modify tags while a background sync is running."
+            )
             return
 
         reply = QMessageBox.question(
@@ -410,7 +409,7 @@ class AppController(QObject):
             "Untag All",
             "Are you sure you want to remove the 'marked' tag from all images?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.backend_job_queue.put(("untag_all", {"tag_name": "marked"}))
@@ -421,7 +420,11 @@ class AppController(QObject):
     def on_move_tagged_requested(self):
         """Move tagged files to a user-selected directory."""
         if self.sync_thread and self.sync_thread.isRunning():
-            QMessageBox.warning(self.window, "Sync in Progress", "Cannot move files while a background sync is running. Please wait or cancel the sync.")
+            QMessageBox.warning(
+                self.window,
+                "Sync in Progress",
+                "Cannot move files while a background sync is running. Please wait or cancel the sync.",
+            )
             return
 
         # Get tagged filepaths from the model
@@ -429,28 +432,24 @@ class AppController(QObject):
         for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
-        
+
         if not tagged_filepaths:
             QMessageBox.information(self.window, "Move Tagged Files", "No files are tagged.")
             return
-        
+
         # Prompt user for destination directory
-        destination = QFileDialog.getExistingDirectory(
-            self.window,
-            "Select Destination Directory for Tagged Files"
-        )
-        
+        destination = QFileDialog.getExistingDirectory(self.window, "Select Destination Directory for Tagged Files")
+
         if not destination:
             return  # User cancelled
-        
+
         # Boundary check: verify destination is within tracked directories
         tracked_dirs = get_scan_directories()
         dest_path = Path(destination).resolve()
         is_within_tracked = any(
-            dest_path.is_relative_to(Path(d).resolve()) or dest_path == Path(d).resolve()
-            for d in tracked_dirs
+            dest_path.is_relative_to(Path(d).resolve()) or dest_path == Path(d).resolve() for d in tracked_dirs
         )
-        
+
         if not is_within_tracked:
             reply = QMessageBox.question(
                 self.window,
@@ -458,7 +457,7 @@ class AppController(QObject):
                 f"The directory '{destination}' is not currently in your scan directories.\n\n"
                 "Would you like to add it to the scan directories?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
+                QMessageBox.StandardButton.Yes,
             )
             if reply == QMessageBox.StandardButton.Yes:
                 # Update config to include new directory
@@ -469,15 +468,13 @@ class AppController(QObject):
                     logger.info(f"Added '{destination}' to scan directories.")
             else:
                 return  # User declined
-        
+
         # Spawn thread to move files
         self.window.update_status_bar(f"Moving {len(tagged_filepaths)} tagged files...")
         self.window.set_controls_enabled(False)
-        
+
         move_thread = threading.Thread(
-            target=self._move_files_thread,
-            args=(tagged_filepaths, destination),
-            daemon=True
+            target=self._move_files_thread, args=(tagged_filepaths, destination), daemon=True
         )
         move_thread.start()
 
@@ -490,13 +487,13 @@ class AppController(QObject):
         """Thread function to move files with collision handling."""
         moved_count = 0
         error_count = 0
-        
+
         for filepath in filepaths:
             try:
                 src = Path(filepath)
                 dest_dir = Path(destination)
                 dest_file = dest_dir / src.name
-                
+
                 # Handle filename collisions
                 if dest_file.exists():
                     stem = src.stem
@@ -505,18 +502,18 @@ class AppController(QObject):
                     while dest_file.exists():
                         dest_file = dest_dir / f"{stem}_{counter}{suffix}"
                         counter += 1
-                
+
                 shutil.move(str(src), str(dest_file))
                 moved_count += 1
             except Exception as e:
                 logger.error(f"Failed to move {filepath}: {e}")
                 error_count += 1
-        
+
         # Report results on main thread
         message = f"Moved {moved_count} files."
         if error_count > 0:
             message += f" {error_count} errors occurred."
-        
+
         # Emit signal to safely update UI from main thread
         self.move_completed.emit(message)
 
@@ -524,7 +521,11 @@ class AppController(QObject):
     def on_delete_tagged_requested(self):
         """Delete tagged files with a critical warning."""
         if self.sync_thread and self.sync_thread.isRunning():
-            QMessageBox.warning(self.window, "Sync in Progress", "Cannot delete files while a background sync is running. Please wait or cancel the sync.")
+            QMessageBox.warning(
+                self.window,
+                "Sync in Progress",
+                "Cannot delete files while a background sync is running. Please wait or cancel the sync.",
+            )
             return
 
         # Get tagged filepaths from the model
@@ -532,11 +533,11 @@ class AppController(QObject):
         for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
-        
+
         if not tagged_filepaths:
             QMessageBox.information(self.window, "Delete Tagged Files", "No files are tagged.")
             return
-        
+
         # Critical warning
         reply = QMessageBox.warning(
             self.window,
@@ -545,21 +546,17 @@ class AppController(QObject):
             "This action cannot be undone!\n\n"
             "Are you absolutely sure you want to proceed?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.No,
         )
-        
+
         if reply != QMessageBox.StandardButton.Yes:
             return
-        
+
         # Spawn thread to delete files
         self.window.update_status_bar(f"Deleting {len(tagged_filepaths)} tagged files...")
         self.window.set_controls_enabled(False)
-        
-        delete_thread = threading.Thread(
-            target=self._delete_files_thread,
-            args=(tagged_filepaths,),
-            daemon=True
-        )
+
+        delete_thread = threading.Thread(target=self._delete_files_thread, args=(tagged_filepaths,), daemon=True)
         delete_thread.start()
 
     @Slot(list, str)
@@ -571,7 +568,7 @@ class AppController(QObject):
             _, filepath, _ = result
             if filepath not in deleted_filepaths_set:
                 new_results.append(result)
-                
+
         self.window.results_model.set_results(new_results)
         self.window.update_status_bar(message)
         self.window.set_controls_enabled(True)
@@ -580,7 +577,7 @@ class AppController(QObject):
         """Thread function to delete files."""
         deleted_count = 0
         error_count = 0
-        
+
         for filepath in filepaths:
             try:
                 os.remove(filepath)
@@ -588,15 +585,15 @@ class AppController(QObject):
             except Exception as e:
                 logger.error(f"Failed to delete {filepath}: {e}")
                 error_count += 1
-        
+
         # Report results
         message = f"Deleted {deleted_count} files."
         if error_count > 0:
             message += f" {error_count} errors occurred."
-        
+
         # Send targeted deletion job to backend to remove DB rows
         self.backend_job_queue.put(("delete_target_filepaths", {"filepath_list": filepaths}))
-        
+
         # Emit signal with deleted filepaths - filtering done on main thread
         self.delete_completed.emit(filepaths, message)
 
@@ -605,7 +602,7 @@ class AppController(QObject):
         """Filter results to show only tagged images."""
         # Trigger a refresh with the tagged_only filter
         self._tagged_only_filter = checked
-        
+
         # Determine current search mode and re-trigger with filter
         # For simplicity, we'll just trigger a random search with the filter
         self.window.clear_results()

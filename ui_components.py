@@ -58,7 +58,7 @@ class SearchResultDelegate(QStyledItemDelegate):
         self.bg_brush_normal = QBrush(QColor(40, 40, 40))
         self.bg_brush_hover = QBrush(QColor(85, 170, 255, 60))
         self.bg_brush_selected = QBrush(QColor(85, 170, 255, 120))
-        
+
         # Pre-allocate tag badge brush and pen
         self.tag_badge_brush = QBrush(QColor(255, 200, 0, 220))
         self.tag_badge_pen = QPen(QColor(200, 150, 0))
@@ -108,11 +108,11 @@ class SearchResultDelegate(QStyledItemDelegate):
             badge_size = 24
             badge_x = item_rect.right() - badge_size - 5
             badge_y = item_rect.y() + 5
-            
+
             painter.setPen(self.tag_badge_pen)
             painter.setBrush(self.tag_badge_brush)
             painter.drawEllipse(badge_x, badge_y, badge_size, badge_size)
-            
+
             painter.setFont(self.tag_badge_font)
             painter.setPen(QColor(50, 50, 50))
             star_rect = QRect(badge_x, badge_y, badge_size, badge_size)

@@ -31,6 +31,7 @@ INVALID_FILE_SENTINEL = "__INVALID__"  # Sentinel SHA for files that fail hashin
 
 _WORKER_KNOWN_SHAS = set()
 
+
 def _init_worker(known_shas: set):
     """Initializes the global state for the ProcessPoolExecutor workers."""
     global _WORKER_KNOWN_SHAS
@@ -45,11 +46,11 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
     """
     try:
         ext = filepath.suffix.lower()
-        
+
         # 1. Hashing & Buffering
         sha256_hash = hashlib.sha256()
         file_buffer = None
-        
+
         try:
             file_size = filepath.stat().st_size
             # For standard images under 50MB, read entirely into memory ONCE to avoid double reads.
@@ -80,6 +81,7 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                 img = None
                 if ext == ".mp4":
                     import cv2
+
                     # Extract frame using OpenCV (max 6 seconds in to avoid long decode times)
                     cap = cv2.VideoCapture(str(filepath))
                     if cap.isOpened():
@@ -244,7 +246,7 @@ class EmbeddingConsumerThread(threading.Thread):
                     self.conn.executemany(
                         "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)", new_embeddings_to_commit
                     )
-                
+
                 # Commit the thumbnails
                 if new_thumbnails_to_commit:
                     self.conn.executemany(
@@ -310,26 +312,24 @@ class ImageDatabase:
                 "CREATE TABLE IF NOT EXISTS visualization (sha256 TEXT PRIMARY KEY, coord_x REAL NOT NULL, coord_y REAL NOT NULL, cluster_id INTEGER NOT NULL, FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE)"
             )
             conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            
+
             # --- TAGS TABLE ---
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS tags (
+            conn.execute("""CREATE TABLE IF NOT EXISTS tags (
                     sha256 TEXT NOT NULL,
                     tag_name TEXT NOT NULL,
                     PRIMARY KEY (sha256, tag_name),
                     FOREIGN KEY (sha256) REFERENCES embeddings (sha256) ON DELETE CASCADE
-                )"""
-            )
+                )""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_sha256 ON tags(sha256)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag_name ON tags(tag_name)")
             # -----------------
-            
+
             # --- POISON PILL: Insert sentinel for invalid files ---
             # This satisfies the FK constraint for files that fail hashing/decoding.
             # We use a minimal 1-byte blob as placeholder.
             conn.execute(
                 "INSERT OR IGNORE INTO embeddings (sha256, embedding) VALUES (?, ?)",
-                (INVALID_FILE_SENTINEL, b'\x00'),
+                (INVALID_FILE_SENTINEL, b"\x00"),
             )
 
     def _get_metadata(self, key: str) -> str | None:
@@ -358,9 +358,7 @@ class ImageDatabase:
             existing_shas = {row[0] for row in conn.execute("SELECT sha256 FROM embeddings").fetchall()}
 
         executor = concurrent.futures.ProcessPoolExecutor(
-            max_workers=HASHING_WORKER_COUNT,
-            initializer=_init_worker,
-            initargs=(existing_shas,)
+            max_workers=HASHING_WORKER_COUNT, initializer=_init_worker, initargs=(existing_shas,)
         )
         try:
             logger.info("Starting database synchronization...")
@@ -548,13 +546,15 @@ class ImageDatabase:
             # 1. Check if update is needed
             with self._get_db_connection() as conn:
                 # Exclude the sentinel from the embedding count
-                emb_count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)).fetchone()[0]
+                emb_count = conn.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)
+                ).fetchone()[0]
                 vis_count = conn.execute("SELECT COUNT(*) FROM visualization").fetchone()[0]
-                
+
                 # Fast check: Is there ANY valid embedding missing from the visualization table?
                 missing_vis = conn.execute(
                     "SELECT 1 FROM embeddings e WHERE e.sha256 != ? AND NOT EXISTS (SELECT 1 FROM visualization v WHERE v.sha256 = e.sha256) LIMIT 1",
-                    (INVALID_FILE_SENTINEL,)
+                    (INVALID_FILE_SENTINEL,),
                 ).fetchone()
 
             # If counts match AND no embeddings are missing, we are 100% up to date.
@@ -707,7 +707,7 @@ class ImageDatabase:
             # 1. Build Filepath Cache
             for sha, path in conn.execute("SELECT sha256, filepath FROM filepaths").fetchall():
                 self._sha_to_path_map_cache[sha].append(path)
-            
+
             # 2. Build Tag Cache
             for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256").fetchall():
                 self._sha_to_tags_cache[sha] = tags
@@ -759,7 +759,7 @@ class ImageDatabase:
         """Used for Random Search. Entirely DB-free and instant."""
         if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
             self._build_memory_caches()
-            
+
         results = []
         for sha, paths in self._sha_to_path_map_cache.items():
             if paths and sha != INVALID_FILE_SENTINEL:
@@ -775,10 +775,9 @@ class ImageDatabase:
         # Fast query: no GROUP BY, no tag joins.
         with self._get_db_connection() as conn:
             rows = conn.execute(
-                "SELECT filepath, sha256, mtime FROM filepaths WHERE sha256 != ?", 
-                (INVALID_FILE_SENTINEL,)
+                "SELECT filepath, sha256, mtime FROM filepaths WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)
             ).fetchall()
-            
+
         results = []
         for filepath, sha, mtime in rows:
             tags = self._sha_to_tags_cache.get(sha, "")
@@ -789,51 +788,47 @@ class ImageDatabase:
         """Convert filepaths to their corresponding SHA256 hashes."""
         if not filepath_list:
             return []
-        
+
         sha256_list = []
         with self._get_db_connection() as conn:
             for i in range(0, len(filepath_list), SQLITE_VARIABLE_LIMIT):
-                chunk = filepath_list[i:i + SQLITE_VARIABLE_LIMIT]
+                chunk = filepath_list[i : i + SQLITE_VARIABLE_LIMIT]
                 placeholders = ", ".join("?" for _ in chunk)
-                cursor = conn.execute(
-                    f"SELECT sha256 FROM filepaths WHERE filepath IN ({placeholders})",
-                    chunk
-                )
+                cursor = conn.execute(f"SELECT sha256 FROM filepaths WHERE filepath IN ({placeholders})", chunk)
                 sha256_list.extend(row[0] for row in cursor.fetchall())
         return sha256_list
 
     def toggle_tag(self, filepath_or_sha_list: list[str], tag_name: str = "marked"):
         if not filepath_or_sha_list:
             return
-        
+
         sha256_list = self._get_sha256_for_filepaths(filepath_or_sha_list)
         if not sha256_list:
             return
-        
+
         with self._get_db_connection() as conn:
             for i in range(0, len(sha256_list), SQLITE_VARIABLE_LIMIT):
-                chunk = sha256_list[i:i + SQLITE_VARIABLE_LIMIT]
+                chunk = sha256_list[i : i + SQLITE_VARIABLE_LIMIT]
                 placeholders = ", ".join("?" for _ in chunk)
-                
+
                 cursor = conn.execute(
-                    f"SELECT sha256 FROM tags WHERE sha256 IN ({placeholders}) AND tag_name = ?",
-                    chunk + [tag_name]
+                    f"SELECT sha256 FROM tags WHERE sha256 IN ({placeholders}) AND tag_name = ?", chunk + [tag_name]
                 )
                 tagged_shas = {row[0] for row in cursor.fetchall()}
-                
+
                 for sha in chunk:
                     if sha in tagged_shas:
                         conn.execute("DELETE FROM tags WHERE sha256 = ? AND tag_name = ?", (sha, tag_name))
                     else:
                         conn.execute("INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", (sha, tag_name))
-        
+
         # INVALIDATE CACHE so it rebuilds on next search
         self._sha_to_tags_cache = None
 
     def untag_all(self, tag_name: str = "marked"):
         with self._get_db_connection() as conn:
             conn.execute("DELETE FROM tags WHERE tag_name = ?", (tag_name,))
-        
+
         # INVALIDATE CACHE
         self._sha_to_tags_cache = None
 
@@ -841,13 +836,13 @@ class ImageDatabase:
         """Delete specific filepaths from the database without full sync."""
         if not filepath_list:
             return
-        
+
         with self._get_db_connection() as conn:
             for i in range(0, len(filepath_list), SQLITE_VARIABLE_LIMIT):
-                chunk = filepath_list[i:i + SQLITE_VARIABLE_LIMIT]
+                chunk = filepath_list[i : i + SQLITE_VARIABLE_LIMIT]
                 placeholders = ", ".join("?" for _ in chunk)
                 conn.execute(f"DELETE FROM filepaths WHERE filepath IN ({placeholders})", chunk)
-        
+
         # Clean up orphaned embeddings after deletion
         self._cleanup_orphaned_embeddings()
 
@@ -855,12 +850,13 @@ class ImageDatabase:
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None
 
-
     def get_all_embeddings_with_shas(self):
         with self._get_db_connection() as conn:
             return [
                 {"sha256": sha, "embedding": self._reconstruct_embedding(eb).flatten()}
-                for sha, eb in conn.execute("SELECT sha256, embedding FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)).fetchall()
+                for sha, eb in conn.execute(
+                    "SELECT sha256, embedding FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)
+                ).fetchall()
             ]
 
     def get_visualization_data(self):
@@ -878,6 +874,6 @@ class ImageDatabase:
         self._embedding_matrix = None
         self._shas_in_order = []
         self._sha_to_path_map_cache = None
-        self._sha_to_tags_cache = None # Clear tag cache
+        self._sha_to_tags_cache = None  # Clear tag cache
         self._cancel_flag.set()
         logger.info("ImageDatabase closed.")

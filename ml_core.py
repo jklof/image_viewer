@@ -36,7 +36,7 @@ class ImageEmbedder:
             self.compute_device = "mps"
         else:
             self.compute_device = "cpu"
-            
+
         logger.info(f"ImageEmbedder initializing. Compute device: {self.compute_device}")
 
         model_kwargs = {}
@@ -76,11 +76,12 @@ class ImageEmbedder:
             # Prevent race condition if unload() was called just as the timer fired
             if self.model is None:
                 return
-                
+
             if not self.is_offloaded and self.compute_device != "cpu":
                 logger.info(f"Model idle for {self.idle_timeout}s. Offloading to RAM...")
                 self.model.to("cpu")
                 import torch
+
                 if self.compute_device == "cuda":
                     torch.cuda.empty_cache()
                 elif self.compute_device == "mps":
@@ -89,6 +90,7 @@ class ImageEmbedder:
 
     def _extract_tensor(self, features):
         import torch
+
         if isinstance(features, torch.Tensor):
             return features
         if hasattr(features, "pooler_output") and features.pooler_output is not None:
@@ -103,6 +105,7 @@ class ImageEmbedder:
 
     def embed_image(self, image: Image.Image) -> np.ndarray:
         import torch
+
         with self.lock:
             self._wake_up()
             with torch.no_grad():
@@ -116,6 +119,7 @@ class ImageEmbedder:
 
     def embed_text(self, text: str) -> np.ndarray:
         import torch
+
         with self.lock:
             self._wake_up()
             with torch.no_grad():
@@ -129,6 +133,7 @@ class ImageEmbedder:
 
     def embed_batch(self, images: list[Image.Image], batch_size: int = 32) -> list[np.ndarray]:
         import torch
+
         with self.lock:
             self._wake_up()
             with torch.no_grad():
@@ -152,7 +157,7 @@ class ImageEmbedder:
             if self.timer is not None:
                 self.timer.cancel()
                 self.timer = None
-                
+
             import torch
 
             if self.model is not None:

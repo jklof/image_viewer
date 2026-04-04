@@ -29,9 +29,10 @@ NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
 # Thread-local storage for SQLite connections so QThreadPool workers don't block each other
 _thread_local = threading.local()
 
+
 def get_thread_local_db():
     current_db_path = get_db_path()
-    
+
     # Create or update connection if missing, or if user changed DB path in preferences
     if getattr(_thread_local, "db_path", None) != current_db_path:
         if hasattr(_thread_local, "conn"):
@@ -39,18 +40,18 @@ def get_thread_local_db():
                 _thread_local.conn.close()
             except Exception:
                 pass
-        
-        # Connect in read-only mode using URI. This guarantees the UI thread 
+
+        # Connect in read-only mode using URI. This guarantees the UI thread
         # can NEVER block the background sync worker with write locks.
         try:
             conn = sqlite3.connect(f"file:{current_db_path}?mode=ro", uri=True, timeout=5.0)
         except sqlite3.OperationalError:
             # Fallback if URI fails or DB doesn't exist yet
             conn = sqlite3.connect(current_db_path, timeout=5.0)
-            
+
         _thread_local.conn = conn
         _thread_local.db_path = current_db_path
-        
+
     return _thread_local.conn
 
 
@@ -107,7 +108,7 @@ class LoadThumbnailTask(QRunnable):
                 conn = get_thread_local_db()
                 cursor = conn.execute(
                     "SELECT t.image_data FROM thumbnails t JOIN filepaths f ON t.sha256 = f.sha256 WHERE f.filepath = ?",
-                    (self.filepath,)
+                    (self.filepath,),
                 )
                 row = cursor.fetchone()
                 if row and row[0]:
@@ -219,6 +220,7 @@ class LoaderManager(QObject):
 
 
 _loader_manager_instance = None
+
 
 def get_loader_manager() -> LoaderManager:
     """Lazily instantiate LoaderManager to ensure QApplication exists first."""

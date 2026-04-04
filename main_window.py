@@ -389,10 +389,7 @@ class OpenCVVideoPlayer(QWidget):
         """Show or hide the tag badge overlay."""
         self._tag_overlay.setVisible(is_tagged)
         # Position in top-right corner of the video_label
-        self._tag_overlay.move(
-            self.video_label.width() - self._tag_overlay.width() - 8,
-            8
-        )
+        self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)
 
     def set_media_data(self, current_path: str, prev_path: str | None, next_path: str | None):
         self.current_filepath = current_path
@@ -545,10 +542,7 @@ class OpenCVVideoPlayer(QWidget):
             self._display_frame(self.current_frame)
 
         if self._tag_overlay.isVisible():
-            self._tag_overlay.move(
-                self.video_label.width() - self._tag_overlay.width() - 8,
-                8
-            )
+            self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)
 
         target_height = int(self.height() * 0.25)
         target_height = max(80, min(300, target_height))
@@ -718,20 +712,20 @@ class MainWindow(QMainWindow):
         self.batch_actions_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.batch_actions_btn.setToolTip("Batch operations for tagged images.")
         self.batch_actions_btn.setIcon(icons.create_icon(icons.SVG_BATCH))
-        
+
         batch_menu = QMenu(self)
         untag_all_action = QAction("Untag All", self)
         untag_all_action.triggered.connect(self.untag_all_requested.emit)
         batch_menu.addAction(untag_all_action)
-        
+
         move_tagged_action = QAction("Move Tagged Files", self)
         move_tagged_action.triggered.connect(self.move_tagged_requested.emit)
         batch_menu.addAction(move_tagged_action)
-        
+
         delete_tagged_action = QAction("Delete Tagged Files", self)
         delete_tagged_action.triggered.connect(self.delete_tagged_requested.emit)
         batch_menu.addAction(delete_tagged_action)
-        
+
         self.batch_actions_btn.setMenu(batch_menu)
 
         action_bar_layout.addWidget(self.random_order_btn)
@@ -984,11 +978,11 @@ class MainWindow(QMainWindow):
         add_pos_action = QAction("Add to Query (+)", self)
         add_pos_action.triggered.connect(lambda: self.query_builder.add_image_element(filepath))
         context_menu.addAction(add_pos_action)
-        
+
         toggle_tag_action = QAction("Toggle Tag (T)", self)
         toggle_tag_action.triggered.connect(self._toggle_tag_for_selection)
         context_menu.addAction(toggle_tag_action)
-        
+
         context_menu.addSeparator()
         copy_path_action = QAction("Copy Full Path", self)
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(filepath))

@@ -104,7 +104,7 @@ class BackendWorker:
         try:
             if not self.db or not self.embedder:
                 return
-            
+
             # Handle both list (legacy) and dict (new) formats
             if isinstance(payload, dict):
                 query_elements = payload.get("query_elements", [])
@@ -112,7 +112,7 @@ class BackendWorker:
             else:
                 query_elements = payload
                 tagged_only = False
-            
+
             logger.info(f"Performing composite search with {len(query_elements)} elements. tagged_only={tagged_only}")
             self.signals.status_update.emit(f"Building query from {len(query_elements)} elements...")
 

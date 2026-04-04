@@ -109,16 +109,16 @@ class ImageResultModel(QAbstractListModel):
             for row in rows:
                 if 0 <= row < len(self.results_data):
                     score, fp, tags = self.results_data[row]
-                    
+
                     # Convert to set for safer manipulation (Also fixes Issue #6)
                     tag_set = set(tags.split(",")) if tags else set()
                     if "marked" in tag_set:
                         tag_set.discard("marked")
                     else:
                         tag_set.add("marked")
-                    
+
                     new_tags = ",".join(filter(None, tag_set))
-                    
+
                     self.results_data[row] = (score, fp, new_tags)
                     index = self.createIndex(row, 0)
                     self.dataChanged.emit(index, index, [TAGS_ROLE])
