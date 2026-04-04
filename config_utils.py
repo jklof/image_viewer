@@ -55,7 +55,8 @@ def save_config(config: dict, config_path: str = DEFAULT_CONFIG_PATH):
     try:
         with open(config_path, "w") as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        _CONFIG_CACHE = config.copy()
+        # Reload config to guarantee cache exactly matches what was written to disk
+        load_config(config_path, force_reload=True)
         logger.info(f"Configuration saved to '{config_path}'.")
     except IOError as e:
         logger.error(f"Error saving configuration to '{config_path}': {e}")

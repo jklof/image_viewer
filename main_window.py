@@ -142,7 +142,7 @@ class NavThumbnail(QWidget):
 
 
 class VideoWorkerThread(QThread):
-    frame_ready = Signal(QImage, object, int)  # QImage, raw BGR frame, frame index
+    frame_ready = Signal(QImage, int)  # QImage, frame index
     video_loaded = Signal(float, int)  # fps, total_frames
 
     def __init__(self, parent=None):
@@ -251,7 +251,7 @@ class VideoWorkerThread(QThread):
                 bytes_per_line = ch * w
                 q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
-                self.frame_ready.emit(q_image, frame, current_idx)
+                self.frame_ready.emit(q_image, current_idx)
             else:
                 # Loop video
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -423,9 +423,9 @@ class OpenCVVideoPlayer(QWidget):
         else:
             self._start_playback()
 
-    @Slot(QImage, object, int)
-    def _on_frame_ready(self, q_image: QImage, raw_frame, frame_idx: int):
-        self.current_frame = raw_frame
+    @Slot(QImage, int)
+    def _on_frame_ready(self, q_image: QImage, frame_idx: int):
+        self.current_frame = q_image.copy()
         self.current_frame_idx = frame_idx
         pixmap = QPixmap.fromImage(q_image)
         self._display_pixmap(pixmap, is_video=True)
@@ -487,8 +487,8 @@ class OpenCVVideoPlayer(QWidget):
         if filepath:
             if not filepath.lower().endswith(".png"):
                 filepath += ".png"
-            # OpenCV writes using the native BGR frame we stored
-            cv2.imwrite(filepath, self.current_frame)
+            # Save frame using Qt native image saving
+            self.current_frame.save(filepath, "PNG")
             logger.info(f"Saved frame to: {filepath}")
 
     def get_current_frame_pixmap(self) -> QPixmap | None:

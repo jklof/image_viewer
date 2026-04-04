@@ -101,6 +101,20 @@ class AppController(QObject):
         self.window.delete_tagged_requested.connect(self.on_delete_tagged_requested)
         self.window.show_tagged_only_btn.toggled.connect(self.on_show_tagged_only_toggled)
 
+    def _disconnect_backend_signals(self, signals):
+        """Disconnect all backend signal slots for the given signals object."""
+        try:
+            signals.initialized.disconnect(self.on_backend_initialized)
+            signals.error.disconnect(self.on_backend_error)
+            signals.warning.disconnect(self.on_backend_warning)
+            signals.results_ready.disconnect(self.on_results_ready)
+            signals.status_update.disconnect(self.window.update_status_bar)
+            signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
+            signals.reloaded.disconnect(self.on_backend_reloaded)
+            signals.tag_operation_failed.disconnect(self.on_tag_operation_failed)
+        except (RuntimeError, AttributeError):
+            pass  # Ignore disconnection errors
+
     @Slot(bool)
     def on_preferences_saved(self, requires_restart: bool):
         """
@@ -116,6 +130,9 @@ class AppController(QObject):
 
         # Store old signals before reassignment
         old_signals = self.backend_signals
+        
+        # Disconnect old signals immediately BEFORE shutting down thread to prevent race conditions
+        self._disconnect_backend_signals(old_signals)
 
         # Disable controls during restart
         self.window.set_controls_enabled(False)
@@ -168,23 +185,7 @@ class AppController(QObject):
 
     def _connect_backend_signals(self, old_signals=None):
         """Reconnect backend signals after soft restart."""
-        if old_signals is None:
-            return  # No old signals to disconnect
-
-        # Disconnect existing backend signals first
-        try:
-            old_signals.initialized.disconnect(self.on_backend_initialized)
-            old_signals.error.disconnect(self.on_backend_error)
-            old_signals.warning.disconnect(self.on_backend_warning)
-            old_signals.results_ready.disconnect(self.on_results_ready)
-            old_signals.status_update.disconnect(self.window.update_status_bar)
-            old_signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
-            old_signals.reloaded.disconnect(self.on_backend_reloaded)
-            old_signals.tag_operation_failed.disconnect(self.on_tag_operation_failed)
-        except (RuntimeError, AttributeError):
-            pass  # Ignore disconnection errors
-
-        # Reconnect backend signals
+        # Connect new backend signals
         self.backend_signals.initialized.connect(self.on_backend_initialized)
         self.backend_signals.error.connect(self.on_backend_error)
         self.backend_signals.warning.connect(self.on_backend_warning)
@@ -389,7 +390,7 @@ class AppController(QObject):
         self.window.results_model.toggle_tag_for_filepaths(filepaths)
         
         # 2. Dispatch job to backend
-        self.backend_job_queue.put(("toggle_tags", {"sha256_list": filepaths, "tag_name": "marked"}))
+        self.backend_job_queue.put(("toggle_tags", {"filepath_list": filepaths, "tag_name": "marked"}))
 
     @Slot(list)
     def on_tag_operation_failed(self, filepaths: list):
@@ -562,7 +563,15 @@ class AppController(QObject):
         delete_thread.start()
 
     @Slot(list, str)
-    def _on_delete_completed(self, new_results: list, message: str):
+    def _on_delete_completed(self, deleted_filepaths: list, message: str):
+        # Filter results on main thread (safe access to GUI model)
+        deleted_filepaths_set = set(deleted_filepaths)
+        new_results = []
+        for result in self.window.results_model.results_data:
+            _, filepath, _ = result
+            if filepath not in deleted_filepaths_set:
+                new_results.append(result)
+                
         self.window.results_model.set_results(new_results)
         self.window.update_status_bar(message)
         self.window.set_controls_enabled(True)
@@ -588,16 +597,8 @@ class AppController(QObject):
         # Send targeted deletion job to backend to remove DB rows
         self.backend_job_queue.put(("delete_target_filepaths", {"filepath_list": filepaths}))
         
-        # Remove deleted files from the results model to update the grid view
-        deleted_filepaths_set = set(filepaths)
-        new_results = []
-        for result in self.window.results_model.results_data:
-            _, filepath, _ = result
-            if filepath not in deleted_filepaths_set:
-                new_results.append(result)
-        
-        # Emit signal to safely update UI from main thread
-        self.delete_completed.emit(new_results, message)
+        # Emit signal with deleted filepaths - filtering done on main thread
+        self.delete_completed.emit(filepaths, message)
 
     @Slot(bool)
     def on_show_tagged_only_toggled(self, checked: bool):

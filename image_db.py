@@ -101,7 +101,6 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                 else:
                     # USE MEMORY BUFFER instead of opening from disk a second time
                     if file_buffer:
-                        import io
                         img = Image.open(io.BytesIO(file_buffer))
                     else:
                         img = Image.open(filepath)
@@ -112,7 +111,6 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
                     img = img.convert("RGB")
                     img.thumbnail(PREPROCESS_TARGET_SIZE, Image.Resampling.LANCZOS)
 
-                    import io
                     out_buffer = io.BytesIO()
                     img.save(out_buffer, format="JPEG", quality=90)
                     img_bytes = out_buffer.getvalue()
@@ -424,6 +422,8 @@ class ImageDatabase:
             if status_callback:
                 status_callback(f"Scanning {directory}...")
             for p in path_obj.rglob("*"):
+                if p.is_symlink():
+                    continue
                 if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
                     try:
                         disk_files[str(p.absolute())] = p.stat().st_mtime
@@ -697,8 +697,7 @@ class ImageDatabase:
 
         except Exception as e:
             logger.error(f"Visualization update failed: {e}")
-            # Optional: re-raise if you want the UI to show the error
-            # raise e
+            raise e
 
     # Rename _build_sha_to_path_map to _build_memory_caches and load tags too
     def _build_memory_caches(self):
@@ -746,7 +745,7 @@ class ImageDatabase:
     def search_similar_images(self, image_path, top_k=-1):
         try:
             image = Image.open(image_path).convert("RGB")
-        except:
+        except Exception:
             return []
         return self._perform_search(self.embedder.embed_image(image), top_k)
 
@@ -861,7 +860,7 @@ class ImageDatabase:
         with self._get_db_connection() as conn:
             return [
                 {"sha256": sha, "embedding": self._reconstruct_embedding(eb).flatten()}
-                for sha, eb in conn.execute("SELECT sha256, embedding FROM embeddings").fetchall()
+                for sha, eb in conn.execute("SELECT sha256, embedding FROM embeddings WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)).fetchall()
             ]
 
     def get_visualization_data(self):

@@ -248,8 +248,7 @@ class BackendWorker:
             logger.error(traceback.format_exc())
 
     def handle_toggle_tags(self, payload: dict):
-        # Note: The UI passes filepaths into 'sha256_list'
-        filepaths = payload.get("sha256_list", [])
+        filepaths = payload.get("filepath_list", [])
         tag_name = payload.get("tag_name", "marked")
         try:
             if not self.db:
