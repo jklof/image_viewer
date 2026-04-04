@@ -854,6 +854,7 @@ class MainWindow(QMainWindow):
         self.random_order_btn.setEnabled(enabled)
         self.sort_by_date_btn.setEnabled(enabled)
         self.settings_btn.setEnabled(enabled)
+        self.batch_actions_btn.setEnabled(enabled)
         if not enabled:
             self.toggle_view_btn.setEnabled(False)
         else:

@@ -355,6 +355,10 @@ class AppController(QObject):
     @Slot(list)
     def on_toggle_tags_requested(self, indices: list):
         """Optimistically toggle tags for selected images."""
+        if self.sync_thread and self.sync_thread.isRunning():
+            self.window.update_status_bar("Cannot toggle tags while sync is running.")
+            return
+            
         if not indices:
             return
         
@@ -377,6 +381,10 @@ class AppController(QObject):
     @Slot()
     def on_untag_all_requested(self):
         """Remove all tags from all images."""
+        if self.sync_thread and self.sync_thread.isRunning():
+            QMessageBox.warning(self.window, "Sync in Progress", "Cannot modify tags while a background sync is running.")
+            return
+
         reply = QMessageBox.question(
             self.window,
             "Untag All",
@@ -392,6 +400,10 @@ class AppController(QObject):
     @Slot()
     def on_move_tagged_requested(self):
         """Move tagged files to a user-selected directory."""
+        if self.sync_thread and self.sync_thread.isRunning():
+            QMessageBox.warning(self.window, "Sync in Progress", "Cannot move files while a background sync is running. Please wait or cancel the sync.")
+            return
+
         # Get tagged filepaths from the model
         tagged_filepaths = []
         for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
@@ -491,6 +503,10 @@ class AppController(QObject):
     @Slot()
     def on_delete_tagged_requested(self):
         """Delete tagged files with a critical warning."""
+        if self.sync_thread and self.sync_thread.isRunning():
+            QMessageBox.warning(self.window, "Sync in Progress", "Cannot delete files while a background sync is running. Please wait or cancel the sync.")
+            return
+
         # Get tagged filepaths from the model
         tagged_filepaths = []
         for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
