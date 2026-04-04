@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 from query_builder import UniversalQueryBuilder
 from qt_visualizer import QtVisualizer
 from loading_spinner import PulsingSpinner
-from ui_components import SearchResultDelegate, FILEPATH_ROLE, SmoothListView
+from ui_components import SearchResultDelegate, FILEPATH_ROLE, TAGS_ROLE, SmoothListView
 from virtual_model import ImageResultModel
 from loader_manager import get_loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
@@ -310,6 +310,23 @@ class OpenCVVideoPlayer(QWidget):
         self.video_label.setMinimumSize(200, 200)
         self.video_label.setStyleSheet("background-color: black;")
         self.video_label.setAcceptDrops(False)
+
+        # Tag badge overlay — shown on top of video_label when image is tagged
+        self._tag_overlay = QLabel("★", self.video_label)
+        self._tag_overlay.setStyleSheet(
+            "background-color: rgba(255, 200, 0, 220);"
+            "color: #333;"
+            "border-radius: 14px;"
+            "font-size: 16px;"
+            "font-weight: bold;"
+            "padding: 2px 6px;"
+        )
+        self._tag_overlay.setFixedSize(28, 28)
+        self._tag_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tag_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._tag_overlay.setVisible(False)
+        self._tag_overlay.raise_()
+
         center_layout.addWidget(self.video_label, 1)
 
         # --- Video Controls UI ---
@@ -367,6 +384,15 @@ class OpenCVVideoPlayer(QWidget):
         self.video_worker.frame_ready.connect(self._on_frame_ready)
         self.video_worker.video_loaded.connect(self._on_video_loaded)
         self.video_worker.start()
+
+    def set_tag_state(self, is_tagged: bool):
+        """Show or hide the tag badge overlay."""
+        self._tag_overlay.setVisible(is_tagged)
+        # Position in top-right corner of the video_label
+        self._tag_overlay.move(
+            self.video_label.width() - self._tag_overlay.width() - 8,
+            8
+        )
 
     def set_media_data(self, current_path: str, prev_path: str | None, next_path: str | None):
         self.current_filepath = current_path
@@ -517,6 +543,12 @@ class OpenCVVideoPlayer(QWidget):
                 self._display_pixmap(pixmap, is_video=False)
         elif self.current_frame is not None:
             self._display_frame(self.current_frame)
+
+        if self._tag_overlay.isVisible():
+            self._tag_overlay.move(
+                self.video_label.width() - self._tag_overlay.width() - 8,
+                8
+            )
 
         target_height = int(self.height() * 0.25)
         target_height = max(80, min(300, target_height))
@@ -819,6 +851,7 @@ class MainWindow(QMainWindow):
         self.start_sync_btn.clicked.connect(self.sync_triggered.emit)
         self.sync_cancel_btn.clicked.connect(self.sync_cancel_triggered.emit)
         self.settings_btn.clicked.connect(self._on_settings_clicked)
+        self.results_model.dataChanged.connect(self._on_model_data_changed)
 
     @Slot()
     def _on_settings_clicked(self):
@@ -1009,8 +1042,17 @@ class MainWindow(QMainWindow):
         status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
         self.update_status_bar(status)
 
+    def _update_single_view_tag_state(self):
+        """Sync the tag badge overlay in single view with the model's current tag state."""
+        if not (0 <= self.current_single_view_index < self.results_model.rowCount()):
+            self.single_image_view_widget.set_tag_state(False)
+            return
+        _, _, tags = self.results_model.results_data[self.current_single_view_index]
+        self.single_image_view_widget.set_tag_state("marked" in tags)
+
     def _show_current_single_image(self):
         self._update_single_image_view_pixmap()
+        self._update_single_view_tag_state()
         self.content_stack.setCurrentWidget(self.single_image_view_widget)
         self.single_image_view_widget.setFocus()
         self._update_toggle_view_button_state()
@@ -1040,12 +1082,14 @@ class MainWindow(QMainWindow):
         if self.current_single_view_index < self.results_model.rowCount() - 1:
             self.current_single_view_index += 1
             self._update_single_image_view_pixmap()
+            self._update_single_view_tag_state()
 
     @Slot()
     def _navigate_prev(self):
         if self.current_single_view_index > 0:
             self.current_single_view_index -= 1
             self._update_single_image_view_pixmap()
+            self._update_single_view_tag_state()
 
     def resizeEvent(self, event: QResizeEvent):
         if self.content_stack.currentWidget() is self.single_image_view_widget:
@@ -1067,10 +1111,27 @@ class MainWindow(QMainWindow):
 
     def _toggle_tag_for_selection(self):
         """Toggle tag for currently selected items."""
+        # When in single view, use the currently displayed image index directly.
+        # The grid selection is stale/empty in this mode.
+        if (
+            self.content_stack.currentWidget() is self.single_image_view_widget
+            and 0 <= self.current_single_view_index < self.results_model.rowCount()
+        ):
+            index = self.results_model.createIndex(self.current_single_view_index, 0)
+            self.toggle_tags_requested.emit([index])
+            return
+
         selected_indexes = self.results_view.selectionModel().selectedIndexes()
         if selected_indexes:
-            # Emit a signal that will be connected to the controller
             self.toggle_tags_requested.emit(selected_indexes)
+
+    @Slot(QModelIndex, QModelIndex, list)
+    def _on_model_data_changed(self, top_left, bottom_right, roles):
+        """Refresh the single-view tag overlay when the underlying model changes."""
+        if self.content_stack.currentWidget() is not self.single_image_view_widget:
+            return
+        if TAGS_ROLE in roles or not roles:
+            self._update_single_view_tag_state()
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_T:
