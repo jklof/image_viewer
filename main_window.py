@@ -349,6 +349,18 @@ class MainWindow(QMainWindow):
         self.show_sync_idle_view()
         self.update_status_bar("Ready. Please run a sync to begin.")
 
+    def show_no_tags_view(self):
+        self.loading_spinner.stop_animation()
+        self.loading_message_label.setText("No tags selected.\n\nTag images to see them here.")
+        self.loading_message_label.setStyleSheet("font-size: 18px; color: #ccc;")
+        self.content_stack.setCurrentWidget(self.loading_overlay_widget)
+
+        self.set_controls_enabled(True)
+        self.set_sync_controls_enabled(True)
+        self.settings_btn.setEnabled(True)
+        self.show_sync_idle_view()
+        self.update_status_bar("No tagged images.")
+
     @Slot(str)
     def update_sync_status(self, message: str):
         self.sync_status_label.setText(message)

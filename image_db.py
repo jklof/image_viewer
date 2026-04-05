@@ -564,7 +564,7 @@ class ImageDatabase:
                 ).fetchone()
 
             # If counts match AND no embeddings are missing, we are 100% up to date.
-            if emb_count > 0 and emb_count == vis_count and missing_vis is None:
+            if emb_count == 0 or (emb_count == vis_count and missing_vis is None):
                 return
 
             if check_cancelled_callback:

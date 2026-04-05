@@ -209,7 +209,7 @@ class AppController(QObject):
 
     @Slot()
     def on_backend_initialized(self):
-        self.on_random_order_requested()
+        self.on_sort_by_date_requested()
 
     @Slot(str)
     def on_backend_error(self, error_message: str):
@@ -263,7 +263,10 @@ class AppController(QObject):
     @Slot(list)
     def on_results_ready(self, results: list):
         if not results:
-            self.window.show_sync_prompt_view()
+            if self._tagged_only_filter:
+                self.window.show_no_tags_view()
+            else:
+                self.window.show_sync_prompt_view()
             return
 
         self.window.set_results_data(results)
@@ -359,7 +362,7 @@ class AppController(QObject):
         # Now that sync is done and data is loaded, it is safe to visualize.
         self.window.visualize_btn.setEnabled(True)
 
-        self.on_random_order_requested()
+        self.on_sort_by_date_requested()
 
     @Slot()
     def on_main_window_closing(self):
@@ -589,11 +592,13 @@ class AppController(QObject):
         """Thread function to delete files."""
         deleted_count = 0
         error_count = 0
+        deleted_filepaths = []
 
         for filepath in filepaths:
             try:
                 os.remove(filepath)
                 deleted_count += 1
+                deleted_filepaths.append(filepath)
             except Exception as e:
                 logger.error(f"Failed to delete {filepath}: {e}")
                 error_count += 1
@@ -604,10 +609,11 @@ class AppController(QObject):
             message += f" {error_count} errors occurred."
 
         # Send targeted deletion job to backend to remove DB rows
-        self.backend_job_queue.put(("delete_target_filepaths", {"filepath_list": filepaths}))
+        if deleted_filepaths:
+            self.backend_job_queue.put(("delete_target_filepaths", {"filepath_list": deleted_filepaths}))
 
         # Emit signal with deleted filepaths - filtering done on main thread
-        self.delete_completed.emit(filepaths, message)
+        self.delete_completed.emit(deleted_filepaths, message)
 
     @Slot(bool)
     def on_show_tagged_only_toggled(self, checked: bool):
