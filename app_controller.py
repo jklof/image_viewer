@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Slot, Signal
+from PySide6.QtCore import QObject, QThread, Slot, Signal, QRunnable, QThreadPool
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from backend import BackendWorker, BackendSignals
@@ -18,6 +18,18 @@ if TYPE_CHECKING:
     from main_window import MainWindow
 
 logger = logging.getLogger(__name__)
+
+
+class GenericTask(QRunnable):
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self):
+        self.func(*self.args, **self.kwargs)
+
 
 
 class AppController(QObject):
