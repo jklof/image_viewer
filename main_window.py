@@ -52,7 +52,6 @@ from loader_manager import get_loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
 from constants import ITEM_WIDTH, ITEM_HEIGHT
 
-# --- NEW IMPORT ---
 import icons
 from ui_video_player import OpenCVVideoPlayer, SingleMediaViewer
 
@@ -114,26 +113,22 @@ class MainWindow(QMainWindow):
         self.random_order_btn = QPushButton("Random Order")
         self.random_order_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.random_order_btn.setToolTip("Display all images in a new random order.")
-        # --- SET ICON ---
         self.random_order_btn.setIcon(icons.create_icon(icons.SVG_SHUFFLE))
 
         self.sort_by_date_btn = QPushButton("Sort by Date")
         self.sort_by_date_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.sort_by_date_btn.setToolTip("Sort all images by modification date (newest first).")
-        # --- SET ICON ---
         self.sort_by_date_btn.setIcon(icons.create_icon(icons.SVG_CALENDAR))
 
         self.toggle_view_btn = QPushButton("Single View")
         self.toggle_view_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.toggle_view_btn.setToolTip("Toggle between grid and single image view.")
         self.toggle_view_btn.setEnabled(False)
-        # --- SET ICON (Initial) ---
         self.toggle_view_btn.setIcon(icons.create_icon(icons.SVG_IMAGE))
 
         self.visualize_btn = QPushButton("Visualize Embeddings")
         self.visualize_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.visualize_btn.setToolTip("View a 2D visualization of all image embeddings.")
-        # --- SET ICON ---
         self.visualize_btn.setIcon(icons.create_icon(icons.SVG_CHART))
 
         self.show_tagged_only_btn = QPushButton("Show Tagged Only")
@@ -175,7 +170,6 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.setFixedHeight(ACTION_BAR_BUTTON_HEIGHT)
         self.settings_btn.setToolTip("Configure directories, database location, and model.")
-        # --- SET ICON ---
         self.settings_btn.setIcon(icons.create_icon(icons.SVG_SETTINGS))
         action_bar_layout.addWidget(self.settings_btn)
 
@@ -233,7 +227,7 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar(self))
         self.statusBar().setStyleSheet("font-size: 14px; padding-left: 5px;")
-        
+
         self.sync_status_label = QLabel("")
         self.sync_status_label.setStyleSheet("padding-right: 15px; color: #aaa;")
         self.sync_progress_bar = QProgressBar()
@@ -242,11 +236,11 @@ class MainWindow(QMainWindow):
         self.sync_cancel_btn = QPushButton("Cancel")
         self.sync_cancel_btn.setFixedWidth(100)
         self.sync_cancel_btn.setIcon(icons.create_icon(icons.SVG_CANCEL))
-        
+
         self.statusBar().addPermanentWidget(self.sync_status_label)
         self.statusBar().addPermanentWidget(self.sync_progress_bar)
         self.statusBar().addPermanentWidget(self.sync_cancel_btn)
-        
+
         self.sync_status_label.hide()
         self.sync_progress_bar.hide()
         self.sync_cancel_btn.hide()
@@ -314,8 +308,6 @@ class MainWindow(QMainWindow):
             self.toggle_view_btn.setEnabled(False)
         else:
             self._update_toggle_view_button_state()
-
-    # ... (Rest of the class remains identical) ...
 
     # --- Slots for Controller to manage Sync UI ---
     def show_sync_active_view(self):

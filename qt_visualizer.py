@@ -95,7 +95,6 @@ class QtVisualizer(QWidget):
 
     data_loaded = Signal(int)
     status_update = Signal(str)
-    # --- RENAMED SIGNAL for clarity ---
     image_selected = Signal(str)
 
     def __init__(self, parent=None):
@@ -128,7 +127,6 @@ class QtVisualizer(QWidget):
         self.tooltip = QtImageTooltip(self)
         self._is_active = False
 
-        # ---  Debounce Timer ---
         self.hover_timer = QTimer(self)
         self.hover_timer.setSingleShot(True)
         self.hover_timer.setInterval(100)  # 100ms delay
@@ -199,7 +197,6 @@ class QtVisualizer(QWidget):
         if 0 <= data_index < len(self.all_data):
             _, _, _, filepath = self.all_data[data_index]
             self.tooltip.hide_tooltip()
-            # --- EMIT a simple signal; let the main window decide what to do ---
             self.image_selected.emit(filepath)
 
     @Slot(str)

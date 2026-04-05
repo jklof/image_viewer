@@ -22,7 +22,6 @@ class PulsingSpinner(QWidget):
 
         self._current_scale = 0.0  # From 0.0 to 1.0, controls pulse
         self._current_alpha = 0  # From 0 to 255, controls fade
-        # --- Store the ring color as an instance attribute ---
         self._ring_color = QColor(85, 170, 255)  # Default to blue
 
         self._timer = QTimer(self)
@@ -51,7 +50,6 @@ class PulsingSpinner(QWidget):
 
         self.update()
 
-    # --- The method now accepts a color argument ---
     def start_animation(self, color: QColor = QColor(85, 170, 255)):
         """
         Starts the animation with the specified color.
@@ -90,7 +88,6 @@ class PulsingSpinner(QWidget):
         current_outer_radius = base_outer_radius * (0.5 + 0.5 * self._current_scale)
         current_inner_radius = base_inner_radius * (0.5 + 0.5 * self._current_scale)
 
-        # --- Use the stored color and apply the calculated alpha ---
         ring_color = QColor(self._ring_color)  # Make a copy to modify alpha
         ring_color.setAlpha(self._current_alpha)
 

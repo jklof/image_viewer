@@ -136,7 +136,15 @@ class EmbeddingConsumerThread(threading.Thread):
     Writes filepaths to DB. Generates embeddings for new hashes using the pre-resized bytes.
     """
 
-    def __init__(self, db_path: str, work_queue: queue.Queue, embedder: "ImageEmbedder", cancel_flag: threading.Event, progress_callback=None, total_jobs=0):
+    def __init__(
+        self,
+        db_path: str,
+        work_queue: queue.Queue,
+        embedder: "ImageEmbedder",
+        cancel_flag: threading.Event,
+        progress_callback=None,
+        total_jobs=0,
+    ):
         super().__init__()
         self.db_path = db_path
         self.work_queue = work_queue

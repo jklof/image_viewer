@@ -11,6 +11,8 @@ import icons
 from ui_thumbnails import NavThumbnail
 
 logger = logging.getLogger(__name__)
+
+
 class VideoWorkerThread(QThread):
     frame_ready = Signal(QImage, int)  # QImage, frame index
     video_loaded = Signal(float, int)  # fps, total_frames
@@ -493,5 +495,3 @@ class OpenCVVideoPlayer(QWidget):
 
 # Alias for backward compatibility
 SingleMediaViewer = OpenCVVideoPlayer
-
-

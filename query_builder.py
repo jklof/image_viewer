@@ -99,13 +99,13 @@ class QueryElementWidget(QFrame):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(8)
-        
+
         if self.element_type == "image":
             self.thumbnail_label = QLabel()
             self.thumbnail_label.setFixedSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
             self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.thumbnail_label.setStyleSheet("border: 1px solid #555; border-radius: 4px; background-color: #222;")
-            
+
             # --- ASYNC THUMBNAIL LOADING ---
             cached_pixmap = thumbnail_cache.get(self.value)
             if cached_pixmap:
@@ -114,7 +114,7 @@ class QueryElementWidget(QFrame):
                 self.thumbnail_label.setText("...")
                 get_loader_manager().thumbnail_loaded.connect(self._on_thumbnail_ready)
                 get_loader_manager().request_thumbnail(self.value)
-            
+
             main_layout.addWidget(self.thumbnail_label)
             full_filename = Path(self.value).name
             short_filename = truncate_text(full_filename, 20)
@@ -125,7 +125,7 @@ class QueryElementWidget(QFrame):
             self.text_label = QLabel(f'"{self.value}"')
             self.text_label.setWordWrap(True)
             main_layout.addWidget(self.text_label, 1)
-            
+
         slider_layout = QHBoxLayout()
         self.weight_slider = WeightSlider(Qt.Orientation.Horizontal)
         self.weight_slider.valueChanged.connect(self._update_weight_label)
@@ -133,12 +133,12 @@ class QueryElementWidget(QFrame):
         self.weight_label.setFixedWidth(40)
         self.weight_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._update_weight_label()
-        
+
         self.remove_btn = QPushButton("✕")
         self.remove_btn.setFixedSize(24, 24)
         self.remove_btn.setToolTip("Remove this element from the query.")
         self.remove_btn.clicked.connect(lambda: self.removed.emit(self))
-        
+
         slider_layout.addWidget(self.weight_slider)
         slider_layout.addWidget(self.weight_label)
         slider_layout.addWidget(self.remove_btn)

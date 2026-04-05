@@ -2,8 +2,9 @@ from PySide6.QtCore import Signal, Qt, Slot, QPoint
 from PySide6.QtGui import QMouseEvent, QPainter, QRegion, QColor, QBrush, QPolygon
 from PySide6.QtWidgets import QWidget
 from loader_manager import get_loader_manager, thumbnail_cache
+
+
 class NavThumbnail(QWidget):
-    # ... (No changes to NavThumbnail class) ...
     clicked = Signal()
 
     def __init__(self, direction="next", parent=None):
@@ -83,5 +84,3 @@ class NavThumbnail(QWidget):
         else:
             points = [QPoint(cx - 4, cy - 8), QPoint(cx + 6, cy), QPoint(cx - 4, cy + 8)]
         painter.drawPolygon(QPolygon(points))
-
-

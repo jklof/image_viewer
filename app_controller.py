@@ -31,7 +31,6 @@ class GenericTask(QRunnable):
         self.func(*self.args, **self.kwargs)
 
 
-
 class AppController(QObject):
     """
     The central controller for the application.
