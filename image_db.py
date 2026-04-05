@@ -136,12 +136,15 @@ class EmbeddingConsumerThread(threading.Thread):
     Writes filepaths to DB. Generates embeddings for new hashes using the pre-resized bytes.
     """
 
-    def __init__(self, db_path: str, work_queue: queue.Queue, embedder: "ImageEmbedder", cancel_flag: threading.Event):
+    def __init__(self, db_path: str, work_queue: queue.Queue, embedder: "ImageEmbedder", cancel_flag: threading.Event, progress_callback=None, total_jobs=0):
         super().__init__()
         self.db_path = db_path
         self.work_queue = work_queue
         self.embedder = embedder
         self.cancel_flag = cancel_flag
+        self.progress_callback = progress_callback
+        self.total_jobs = total_jobs
+        self.processed_count = 0
         self.conn = None
         self.setName("EmbeddingConsumer")
 
@@ -263,6 +266,10 @@ class EmbeddingConsumerThread(threading.Thread):
                     self.conn.executemany(
                         "INSERT OR REPLACE INTO filepaths (filepath, sha256, mtime) VALUES (?, ?, ?)", filepath_data
                     )
+
+            if self.progress_callback:
+                self.processed_count += len(batch)
+                self.progress_callback("processing", self.processed_count, self.total_jobs)
 
         except Exception as e:
             logger.error(f"Error in batch processing: {e}")
@@ -460,9 +467,11 @@ class ImageDatabase:
     ):
         total_jobs = len(paths_to_hash)
         if status_callback:
-            status_callback(f"Hashing {total_jobs} files...")
+            status_callback(f"Hashing and Embedding {total_jobs} files...")
         work_queue = queue.Queue(maxsize=PIPELINE_QUEUE_SIZE)
-        consumer = EmbeddingConsumerThread(self.db_path, work_queue, self.embedder, self._cancel_flag)
+        consumer = EmbeddingConsumerThread(
+            self.db_path, work_queue, self.embedder, self._cancel_flag, progress_callback, total_jobs
+        )
         consumer.start()
 
         # Sort paths alphabetically to roughly group files by directory.
@@ -485,9 +494,6 @@ class ImageDatabase:
                             break
                         except queue.Full:
                             continue
-                completed += 1
-                if progress_callback:
-                    progress_callback("hashing", completed, total_jobs)
         finally:
             work_queue.put(None)
             consumer.join()

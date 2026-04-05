@@ -7,6 +7,8 @@ __pycache__/
 imgview-dev/
 #databases
 *.db
+*.db-shm
+*.db-wal
 #config file
 config.yml
 
