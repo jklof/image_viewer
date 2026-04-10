@@ -28,14 +28,13 @@ class SmoothListView(QListView):
         self.setUniformItemSizes(True)
 
     def resizeEvent(self, event):
-        if self.resizeMode() == QListView.ResizeMode.Adjust:
-            self.setResizeMode(QListView.ResizeMode.Fixed)
+        # Don't toggle resize mode — just debounce the layout call
         self._resize_timer.start(100)
         super().resizeEvent(event)
 
     def _finalize_resize(self):
-        self.setResizeMode(QListView.ResizeMode.Adjust)
         self.doItemsLayout()
+        self.viewport().update()
 
 
 class SearchResultDelegate(QStyledItemDelegate):

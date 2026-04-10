@@ -335,10 +335,17 @@ class AppController(QObject):
         # 1. Tell the thread to quit. This is a non-blocking request.
         if self.sync_thread:
             self.sync_thread.quit()
-        # 2. ALWAYS reload, because DB state might have partially changed
-        # even on cancel/error.
-        self.window.update_sync_status("Reloading data...")
-        self.backend_job_queue.put(("reload", None))
+            
+        # Only reload if something actually changed
+        if result in ("success", "partial"):
+            self.window.update_sync_status("Reloading data...")
+            self.backend_job_queue.put(("reload", None))
+        else:
+            # Cancelled with no changes — just restore UI
+            self.window.show_sync_idle_view()
+            self.window.set_sync_controls_enabled(True)
+            self.window.visualize_btn.setEnabled(True)
+            self.on_sort_by_date_requested()
 
     @Slot()
     def _on_sync_thread_finished(self):

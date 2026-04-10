@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 HASHING_WORKER_COUNT = min(4, os.cpu_count() or 4)
 EMBEDDING_BATCH_SIZE = 64
 PIPELINE_QUEUE_SIZE = 256
-SQLITE_VARIABLE_LIMIT = 900
+SQLITE_VARIABLE_LIMIT = 900  # Conservative limit; SQLite default max is 999
 MAX_IMAGE_PIXELS = 80 * 1000 * 1000
 PREPROCESS_TARGET_SIZE = (256, 256)  # Size for CLIP pre-processing
 INVALID_FILE_SENTINEL = "__INVALID__"  # Sentinel SHA for files that fail hashing/decoding
@@ -300,6 +300,7 @@ class ImageDatabase:
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None  # NEW: Cache tags in RAM for instant searches
         self._cancel_flag = threading.Event()
+        self._cache_lock = threading.Lock()
         self._load_embeddings_into_memory()
 
     def _get_db_connection(self):
@@ -514,8 +515,9 @@ class ImageDatabase:
         self._load_embeddings_into_memory()
 
     def _load_embeddings_into_memory(self):
-        self._sha_to_path_map_cache = None
-        self._sha_to_tags_cache = None  # Invalidate tag cache on reload
+        with self._cache_lock:
+            self._sha_to_path_map_cache = None
+            self._sha_to_tags_cache = None  # Invalidate tag cache on reload
         with self._get_db_connection() as conn:
             # Filter out the sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
             rows = conn.execute(
@@ -704,6 +706,10 @@ class ImageDatabase:
             vis_data = [(sh, float(c[0]), float(c[1]), int(l)) for sh, c, l in zip(all_shas, coords_2d, cluster_labels)]
 
             with self._get_db_connection() as conn:
+                # The data is ready. Any InterruptedError raised *before* this point means
+                # the old visualization data is safely retained without being deleted.
+                # The DELETE and INSERT below are wrapped in an atomic transaction
+                # by the sqlite3 connection's context manager.
                 conn.execute("DELETE FROM visualization")
                 conn.executemany(
                     "INSERT INTO visualization (sha256, coord_x, coord_y, cluster_id) VALUES (?, ?, ?, ?)", vis_data
@@ -726,6 +732,11 @@ class ImageDatabase:
             for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256").fetchall():
                 self._sha_to_tags_cache[sha] = tags
 
+    def _ensure_caches(self):
+        with self._cache_lock:
+            if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
+                self._build_memory_caches()
+
     def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[float, str, str]]:
         # --- OPTIMIZATION: Efficient Numpy Search ---
         if self._embedding_matrix is None or len(self._embedding_matrix) == 0:
@@ -735,8 +746,7 @@ class ImageDatabase:
         similarities = np.dot(self._embedding_matrix, query_embedding.T).flatten()
 
         # Build caches if they don't exist
-        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
-            self._build_memory_caches()
+        self._ensure_caches()
 
         if top_k != -1 and top_k < len(similarities):
             # Partial sort is faster than full sort
@@ -771,8 +781,7 @@ class ImageDatabase:
 
     def get_all_unique_filepaths(self):
         """Used for Random Search. Entirely DB-free and instant."""
-        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
-            self._build_memory_caches()
+        self._ensure_caches()
 
         results = []
         for sha, paths in self._sha_to_path_map_cache.items():
@@ -783,8 +792,7 @@ class ImageDatabase:
 
     def get_all_filepaths_with_mtime(self):
         """Used for Sort By Date. Fetches mtime, maps tags via RAM."""
-        if self._sha_to_path_map_cache is None or self._sha_to_tags_cache is None:
-            self._build_memory_caches()
+        self._ensure_caches()
 
         # Fast query: no GROUP BY, no tag joins.
         with self._get_db_connection() as conn:

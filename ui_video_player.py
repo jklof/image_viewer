@@ -97,22 +97,20 @@ class VideoWorkerThread(QThread):
                 if not is_playing and seek_target == -1 and step_direction == 0:
                     self.condition.wait()
                     continue
+                
+                # Reset consumed state while holding lock
+                self._seek_target = -1
+                self._step_direction = 0
 
+            # All I/O happens outside the lock
             # Handle seeking
             if seek_target != -1:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, seek_target)
-                with self.lock:
-                    self._seek_target = -1
 
             # Handle stepping backward (requires seek)
             if step_direction == -1:
                 current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, current_pos - 2))
-                with self.lock:
-                    self._step_direction = 0
-            elif step_direction == 1:
-                with self.lock:
-                    self._step_direction = 0
 
             ret, frame = self.cap.read()
             if ret:
@@ -352,23 +350,6 @@ class OpenCVVideoPlayer(QWidget):
         scaled = pixmap.scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio, transform_mode)
         self.video_label.setPixmap(scaled)
 
-    def _display_frame(self, frame):
-        """Convert OpenCV frame to QPixmap and display it."""
-        self.current_frame = frame.copy()  # Store original BGR for extraction
-
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-
-        # .copy() is CRITICAL here so Qt maintains ownership of the memory
-        # when the Python numpy array is garbage collected!
-        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(q_image)
-
-        # Display as video (FastTransformation for CPU efficiency)
-        self._display_pixmap(pixmap, is_video=True)
-
     def _extract_current_frame(self):
         """Save the current video frame as a PNG file."""
         if self.current_frame is None or not self.current_filepath:
@@ -394,15 +375,7 @@ class OpenCVVideoPlayer(QWidget):
         """
         if self.current_frame is None:
             return None
-
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-
-        # Create QImage with copy to ensure Qt owns the memory
-        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        return QPixmap.fromImage(q_image)
+        return QPixmap.fromImage(self.current_frame)
 
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
@@ -411,7 +384,8 @@ class OpenCVVideoPlayer(QWidget):
             if not pixmap.isNull():
                 self._display_pixmap(pixmap, is_video=False)
         elif self.current_frame is not None:
-            self._display_frame(self.current_frame)
+            pixmap = QPixmap.fromImage(self.current_frame)
+            self._display_pixmap(pixmap, is_video=True)
 
         if self._tag_overlay.isVisible():
             self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)

@@ -93,6 +93,7 @@ class QueryElementWidget(QFrame):
         super().__init__()
         self.element_type = element_type
         self.value = value
+        self._thumbnail_connected = False
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setObjectName("QueryElementFrame")
         self.setStyleSheet("#QueryElementFrame { border: 1px solid #444; border-radius: 5px; }")
@@ -113,6 +114,7 @@ class QueryElementWidget(QFrame):
             else:
                 self.thumbnail_label.setText("...")
                 get_loader_manager().thumbnail_loaded.connect(self._on_thumbnail_ready)
+                self._thumbnail_connected = True
                 get_loader_manager().request_thumbnail(self.value)
 
             main_layout.addWidget(self.thumbnail_label)
@@ -169,6 +171,15 @@ class QueryElementWidget(QFrame):
 
     def get_data(self) -> dict:
         return {"type": self.element_type, "value": self.value, "weight": self.get_weight()}
+
+    def cleanup(self):
+        """Safely disconnect signals to prevent memory leaks when removing the widget."""
+        if self.element_type == "image" and self._thumbnail_connected:
+            try:
+                get_loader_manager().thumbnail_loaded.disconnect(self._on_thumbnail_ready)
+                self._thumbnail_connected = False
+            except (RuntimeError, TypeError):
+                pass
 
 
 class UniversalQueryBuilder(QWidget):
@@ -267,6 +278,7 @@ class UniversalQueryBuilder(QWidget):
 
     @Slot(object)
     def remove_element(self, element_widget: QueryElementWidget):
+        element_widget.cleanup()
         element_widget.deleteLater()
         self._check_search_button_state()
 
@@ -275,6 +287,7 @@ class UniversalQueryBuilder(QWidget):
         for i in reversed(range(self.element_list_layout.count())):
             item = self.element_list_layout.itemAt(i)
             if item and isinstance(item.widget(), QueryElementWidget):
+                item.widget().cleanup()
                 item.widget().deleteLater()
                 self.element_list_layout.takeAt(i)
         self._check_search_button_state()

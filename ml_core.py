@@ -32,8 +32,8 @@ class ImageEmbedder:
             self.compute_device = "cpu"
         elif torch.cuda.is_available():
             self.compute_device = "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            self.compute_device = "mps"
+        # MPS has known precision bugs with CLIP layernorm that severely degrade 
+        # embedding quality and similarity search order. Falling back to CPU.
         else:
             self.compute_device = "cpu"
 
