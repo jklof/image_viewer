@@ -322,7 +322,10 @@ class UniversalQueryBuilder(QWidget):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent):
-        for url in event.mimeData().urls():
+        urls = event.mimeData().urls()
+        if len(urls) > 50:
+            urls = urls[:50]
+        for url in urls:
             filepath = url.toLocalFile()
             if filepath.lower().endswith((".png", ".jpg", ".jpeg")):
                 self.add_image_element(filepath)

@@ -440,7 +440,7 @@ class ImageDatabase:
                     continue
                 if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".mp4"):
                     try:
-                        disk_files[str(p.absolute())] = p.stat().st_mtime
+                        disk_files[p.resolve().as_posix()] = p.stat().st_mtime
                     except OSError:
                         continue
         return disk_files
@@ -697,7 +697,10 @@ class ImageDatabase:
                 status_callback("Clustering...")
 
             # We cluster on the 2D output. It's fast enough.
-            cluster_labels = hdbscan.HDBSCAN(min_cluster_size=10, core_dist_n_jobs=-1).fit_predict(coords_2d)
+            if len(coords_2d) < 10:
+                cluster_labels = np.zeros(len(coords_2d), dtype=int)
+            else:
+                cluster_labels = hdbscan.HDBSCAN(min_cluster_size=10, core_dist_n_jobs=-1).fit_predict(coords_2d)
 
             # --- STEP 5: SAVE ---
             if status_callback:

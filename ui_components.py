@@ -143,8 +143,11 @@ class SearchResultDelegate(QStyledItemDelegate):
                 self._text_height,
             )
 
-            fm = painter.fontMetrics()
-            elided_text = fm.elidedText(filename, Qt.TextElideMode.ElideRight, filename_rect.width())
+            if len(filename) > 25:
+                elided_text = filename[:12] + "..." + filename[-10:]
+            else:
+                elided_text = filename
+                
             painter.drawText(filename_rect, Qt.AlignmentFlag.AlignCenter, elided_text)
 
         painter.restore()

@@ -22,7 +22,7 @@ from config_utils import get_db_path
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-THUMBNAIL_CACHE_SIZE = 5000  # Increased to prevent thrashing on large scroll views
+THUMBNAIL_CACHE_SIZE = 1000  # Limited to prevent high RAM usage
 # High worker count is safe here; Condition variables prevent CPU busy loops
 NUM_WORKERS = max(2, QThread.idealThreadCount() - 1)
 
@@ -122,8 +122,6 @@ class LoadThumbnailTask(QRunnable):
                 if ext.endswith(".mp4"):
                     cap = cv2.VideoCapture(self.filepath)
                     if cap.isOpened():
-                        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.1))
                         ret, frame = cap.read()
                         if ret:
                             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

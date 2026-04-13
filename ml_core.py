@@ -123,7 +123,7 @@ class ImageEmbedder:
         with self.lock:
             self._wake_up()
             with torch.no_grad():
-                inputs = self.processor(text=text, return_tensors="pt").to(self.compute_device)
+                inputs = self.processor(text=text, return_tensors="pt", padding=True, truncation=True).to(self.compute_device)
                 features = self.model.get_text_features(**inputs)
                 features = self._extract_tensor(features)
                 features = features / features.norm(dim=-1, keepdim=True)
