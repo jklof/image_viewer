@@ -441,7 +441,7 @@ class MainWindow(QMainWindow):
     def on_single_view_context_menu(self, pos: QPoint):
         if self.current_single_view_index < 0:
             return
-        _, filepath, _ = self.results_model.results_data[self.current_single_view_index]
+        _, filepath, _, _ = self.results_model.results_data[self.current_single_view_index]
         context_menu = self._create_context_menu(filepath)
         context_menu.exec(self.single_image_view_widget.video_label.mapToGlobal(pos))
 
@@ -457,15 +457,15 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < total_count):
             return
 
-        _, current_filepath, _ = self.results_model.results_data[self.current_single_view_index]
+        _, current_filepath, _, _ = self.results_model.results_data[self.current_single_view_index]
 
         prev_filepath = None
         if self.current_single_view_index > 0:
-            _, prev_filepath, _ = self.results_model.results_data[self.current_single_view_index - 1]
+            _, prev_filepath, _, _ = self.results_model.results_data[self.current_single_view_index - 1]
 
         next_filepath = None
         if self.current_single_view_index < total_count - 1:
-            _, next_filepath, _ = self.results_model.results_data[self.current_single_view_index + 1]
+            _, next_filepath, _, _ = self.results_model.results_data[self.current_single_view_index + 1]
 
         self.single_image_view_widget.set_media_data(current_filepath, prev_filepath, next_filepath)
 
@@ -477,7 +477,7 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < self.results_model.rowCount()):
             self.single_image_view_widget.set_tag_state(False)
             return
-        _, _, tags = self.results_model.results_data[self.current_single_view_index]
+        _, _, tags, _ = self.results_model.results_data[self.current_single_view_index]
         self.single_image_view_widget.set_tag_state("marked" in tags)
 
     def _show_current_single_image(self):

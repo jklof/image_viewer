@@ -218,9 +218,11 @@ class AppController(QObject):
 
     @Slot(str)
     def on_backend_warning(self, message: str):
-        """Displays a non-fatal warning to the user without locking the UI."""
+        """Displays a non-fatal warning to the user and attempts to clear any stuck loading UI."""
+        self.window.show_results_view()
+        self.window.set_controls_enabled(True)
         self.window.update_status_bar(message)
-        QMessageBox.warning(self.window, "Search Failed", message)
+        QMessageBox.warning(self.window, "Action Failed", message)
 
     @Slot(list)
     def on_composite_search_requested(self, query_elements: list):
@@ -398,7 +400,7 @@ class AppController(QObject):
         for index in indices:
             row = index.row()
             if 0 <= row < len(self.window.results_model.results_data):
-                _, filepath, _ = self.window.results_model.results_data[row]
+                _, filepath, _, _ = self.window.results_model.results_data[row]
                 filepaths.append(filepath)
 
         if not filepaths:
@@ -450,7 +452,7 @@ class AppController(QObject):
 
         # Get tagged filepaths from the model
         tagged_filepaths = []
-        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+        for row, (_, filepath, tags, _) in enumerate(self.window.results_model.results_data):
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
 
@@ -551,7 +553,7 @@ class AppController(QObject):
 
         # Get tagged filepaths from the model
         tagged_filepaths = []
-        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+        for row, (_, filepath, tags, _) in enumerate(self.window.results_model.results_data):
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
 
@@ -586,7 +588,7 @@ class AppController(QObject):
         deleted_filepaths_set = set(deleted_filepaths)
         new_results = []
         for result in self.window.results_model.results_data:
-            _, filepath, _ = result
+            _, filepath, _, _ = result
             if filepath not in deleted_filepaths_set:
                 new_results.append(result)
 

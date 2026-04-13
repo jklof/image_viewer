@@ -162,7 +162,7 @@ class BackendWorker:
                 final_query_vector = combined_vector / norm
                 results = self.db._perform_search(final_query_vector, -1)
                 if tagged_only:
-                    results = [(s, f, t) for s, f, t in results if "marked" in t.split(",")]
+                    results = [(s, f, t, h) for s, f, t, h in results if "marked" in t.split(",")]
                 self.signals.results_ready.emit(results)
             else:
                 # All elements failed or resulted in zero vector
@@ -192,8 +192,8 @@ class BackendWorker:
             filepaths_with_tags = self.db.get_all_unique_filepaths()
             random.shuffle(filepaths_with_tags)
             if tagged_only:
-                filepaths_with_tags = [(f, t) for f, t in filepaths_with_tags if "marked" in t.split(",")]
-            results = [(0.0, path, tags) for path, tags in filepaths_with_tags]
+                filepaths_with_tags = [(f, t, h) for f, t, h in filepaths_with_tags if "marked" in t.split(",")]
+            results = [(0.0, path, tags, has_duplicates) for path, tags, has_duplicates in filepaths_with_tags]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
@@ -207,8 +207,8 @@ class BackendWorker:
             files_with_mtime_tags = self.db.get_all_filepaths_with_mtime()
             files_with_mtime_tags.sort(key=lambda x: x[1], reverse=True)
             if tagged_only:
-                files_with_mtime_tags = [(f, m, t) for f, m, t in files_with_mtime_tags if "marked" in t.split(",")]
-            results = [(0.0, path, tags) for path, mtime, tags in files_with_mtime_tags]
+                files_with_mtime_tags = [(f, m, t, h) for f, m, t, h in files_with_mtime_tags if "marked" in t.split(",")]
+            results = [(0.0, path, tags, has_duplicates) for path, mtime, tags, has_duplicates in files_with_mtime_tags]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())

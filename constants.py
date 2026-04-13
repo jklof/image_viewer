@@ -10,3 +10,4 @@ ITEM_HEIGHT = 210
 FILEPATH_ROLE = Qt.ItemDataRole.UserRole + 1
 SCORE_ROLE = Qt.ItemDataRole.UserRole + 2
 TAGS_ROLE = Qt.ItemDataRole.UserRole + 3
+HAS_DUPLICATES_ROLE = Qt.ItemDataRole.UserRole + 4

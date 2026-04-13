@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QListView
 from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QPen, QBrush
 from PySide6.QtCore import Qt, QSize, QRect, QTimer
 
-from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
+from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE, HAS_DUPLICATES_ROLE
 
 
 def create_placeholder_pixmap() -> QPixmap:
@@ -149,5 +149,25 @@ class SearchResultDelegate(QStyledItemDelegate):
                 elided_text = filename
                 
             painter.drawText(filename_rect, Qt.AlignmentFlag.AlignCenter, elided_text)
+
+        duplicate_count = index.data(HAS_DUPLICATES_ROLE)
+        if duplicate_count and duplicate_count > 1:
+            badge_size = 22
+            badge_x = item_rect.left() + 5 
+            badge_y = item_rect.y() + 5
+
+            painter.setPen(QPen(QColor(0, 100, 200)))
+            painter.setBrush(QBrush(QColor(50, 150, 255, 220)))
+            painter.drawEllipse(badge_x, badge_y, badge_size, badge_size)
+
+            dup_font = QFont()
+            dup_font.setBold(True)
+            dup_font.setPointSize(9)
+            painter.setFont(dup_font)
+            painter.setPen(QColor(255, 255, 255))
+            
+            dup_rect = QRect(badge_x, badge_y, badge_size, badge_size)
+            text = f"x{duplicate_count}"
+            painter.drawText(dup_rect, Qt.AlignmentFlag.AlignCenter, text)
 
         painter.restore()

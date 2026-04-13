@@ -765,7 +765,8 @@ class ImageDatabase:
             paths = self._sha_to_path_map_cache.get(sha)
             if paths:
                 tags = self._sha_to_tags_cache.get(sha, "")
-                results.append((float(similarities[i]), paths[0], tags))
+                duplicate_count = len(paths)
+                results.append((float(similarities[i]), paths[0], tags, duplicate_count))
         return results
         # --------------------------------------------
 
@@ -790,7 +791,8 @@ class ImageDatabase:
         for sha, paths in self._sha_to_path_map_cache.items():
             if paths and sha != INVALID_FILE_SENTINEL:
                 tags = self._sha_to_tags_cache.get(sha, "")
-                results.append((paths[0], tags))
+                duplicate_count = len(paths)
+                results.append((paths[0], tags, duplicate_count))
         return results
 
     def get_all_filepaths_with_mtime(self):
@@ -803,10 +805,19 @@ class ImageDatabase:
                 "SELECT filepath, sha256, mtime FROM filepaths WHERE sha256 != ?", (INVALID_FILE_SENTINEL,)
             ).fetchall()
 
-        results = []
+        sha_to_mtime = {}
         for filepath, sha, mtime in rows:
-            tags = self._sha_to_tags_cache.get(sha, "")
-            results.append((filepath, mtime, tags))
+            if sha not in sha_to_mtime or mtime > sha_to_mtime[sha]:
+                sha_to_mtime[sha] = mtime
+
+        results = []
+        for sha, paths in self._sha_to_path_map_cache.items():
+            if paths and sha != INVALID_FILE_SENTINEL:
+                tags = self._sha_to_tags_cache.get(sha, "")
+                duplicate_count = len(paths)
+                mtime = sha_to_mtime.get(sha, 0.0)
+                results.append((paths[0], mtime, tags, duplicate_count))
+                
         return results
 
     def _get_sha256_for_filepaths(self, filepath_list: list[str]) -> list[str]:
