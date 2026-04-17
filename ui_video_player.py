@@ -2,15 +2,72 @@ import logging
 from pathlib import Path
 import threading
 import cv2
+from uuid import uuid4
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QThread, QTimer
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QThread, QRect, QSize
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QResizeEvent, QKeyEvent, QWheelEvent, QDrag
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand
 
 import icons
 from ui_thumbnails import NavThumbnail
 
 logger = logging.getLogger(__name__)
+
+
+class CroppableLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.rubber_band.hide()
+        self.origin = QPoint()
+        self._is_selecting = False
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = event.pos()
+            self._is_selecting = False
+            # Accept event to prevent parent from starting drag immediately, 
+            # allowing us to handle drag vs click.
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            # Only start drawing rubber band if moved past a threshold
+            if not self._is_selecting and (event.pos() - self.origin).manhattanLength() > 5:
+                self._is_selecting = True
+                self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+                self.rubber_band.show()
+
+            if self._is_selecting:
+                self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+                event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._is_selecting:
+                # It was just a click, clear selection
+                self.clear_selection()
+            self._is_selecting = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.ignore()  # Bubble up to OpenCVVideoPlayer
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def has_selection(self) -> bool:
+        return self.rubber_band.isVisible() and self.rubber_band.geometry().width() > 5
+
+    def clear_selection(self):
+        self.rubber_band.hide()
+        self._is_selecting = False
 
 
 class VideoWorkerThread(QThread):
@@ -175,8 +232,8 @@ class OpenCVVideoPlayer(QWidget):
         # Center Container
         center_layout = QVBoxLayout()
 
-        # --- Video/Image Display ---
-        self.video_label = QLabel()
+# --- Video/Image Display ---
+        self.video_label = CroppableLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_label.setMinimumSize(200, 200)
@@ -289,6 +346,7 @@ class OpenCVVideoPlayer(QWidget):
                 self._display_pixmap(pixmap, is_video=False)
             else:
                 self.video_label.setText("Could not load image.")
+            self.video_label.clear_selection()  # Clear selection when loading new image
 
     def _load_video(self, filepath: str):
         self.video_worker.load_video(filepath)
@@ -368,6 +426,58 @@ class OpenCVVideoPlayer(QWidget):
 
         # Display as video (FastTransformation for CPU efficiency)
         self._display_pixmap(pixmap, is_video=True)
+
+
+    def get_cropped_image(self) -> QImage | None:
+        """Get the currently selected crop area as a QImage.
+
+        Returns:
+            QImage: The cropped image in original resolution, or None if no selection.
+        """
+        if not self.video_label.has_selection():
+            return None
+
+        # Get the original full-res image
+        if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
+            orig_img = QImage(self.current_filepath)
+            if orig_img.isNull():
+                return None
+        else:
+            # For video, use the current frame
+            if self.current_frame is None:
+                return None
+            # Convert BGR to RGB
+            rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            orig_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+        # Get the displayed scaled pixmap
+        scaled_pixmap = self.video_label.pixmap()
+        if scaled_pixmap.isNull():
+            return None
+
+        # Calculate letterbox offset
+        offset_x = (self.video_label.width() - scaled_pixmap.width()) // 2
+        offset_y = (self.video_label.height() - scaled_pixmap.height()) // 2
+
+        # Get the selection box
+        sel = self.video_label.rubber_band.geometry()
+
+        # Calculate scale factors
+        scale_x = orig_img.width() / scaled_pixmap.width()
+        scale_y = orig_img.height() / scaled_pixmap.height()
+
+        # Translate the crop to original image coordinates
+        orig_x = int((sel.x() - offset_x) * scale_x)
+        orig_y = int((sel.y() - offset_y) * scale_y)
+        orig_w = int(sel.width() * scale_x)
+        orig_h = int(sel.height() * scale_y)
+
+        # Clamp to image boundaries
+        crop_rect = QRect(orig_x, orig_y, orig_w, orig_h).intersected(orig_img.rect())
+
+        return orig_img.copy(crop_rect)
 
     def _extract_current_frame(self):
         """Save the current video frame as a PNG file."""

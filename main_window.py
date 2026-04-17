@@ -426,6 +426,19 @@ class MainWindow(QMainWindow):
         copy_image_action = QAction("Copy Image", self)
         copy_image_action.triggered.connect(lambda: self.copy_image_to_clipboard(filepath))
         context_menu.addAction(copy_image_action)
+
+        # Add crop-related actions if in single view with selection
+        if self.content_stack.currentWidget() is self.single_image_view_widget:
+            if self.single_image_view_widget.video_label.has_selection():
+                context_menu.addSeparator()
+
+                copy_crop_action = QAction("Copy Selected Area", self)
+                copy_crop_action.triggered.connect(self._copy_cropped_area)
+                context_menu.addAction(copy_crop_action)
+
+                search_crop_action = QAction("Add Selected Area to Query", self)
+                search_crop_action.triggered.connect(self._search_cropped_area)
+                context_menu.addAction(search_crop_action)
         return context_menu
 
     @Slot(QPoint)
@@ -538,6 +551,37 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap(filepath)
         if not pixmap.isNull():
             QApplication.clipboard().setPixmap(pixmap)
+
+
+    def _copy_cropped_area(self):
+        """Copy the currently selected crop area to clipboard."""
+        cropped = self.single_image_view_widget.get_cropped_image()
+        if cropped:
+            QApplication.clipboard().setImage(cropped)
+            self.single_image_view_widget.video_label.clear_selection()
+
+
+    def _search_cropped_area(self):
+        """Add the currently selected crop area to the query."""
+        cropped = self.single_image_view_widget.get_cropped_image()
+        if cropped:
+            import tempfile
+            import uuid
+            from pathlib import Path
+
+            # Create temp directory for crops
+            temp_dir = Path(tempfile.gettempdir()) / "ai_image_explorer_crops"
+            temp_dir.mkdir(exist_ok=True)
+
+            # Save cropped image to temp file
+            temp_path = temp_dir / f"crop_{uuid.uuid4().hex[:8]}.png"
+            cropped.save(str(temp_path), "PNG")
+
+            # Add to query
+            self.query_builder.add_image_element(str(temp_path))
+
+            # Clear selection
+            self.single_image_view_widget.video_label.clear_selection()
 
     def _toggle_tag_for_selection(self):
         """Toggle tag for currently selected items."""
