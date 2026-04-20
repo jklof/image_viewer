@@ -51,6 +51,7 @@ from virtual_model import ImageResultModel
 from loader_manager import get_loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
 from constants import ITEM_WIDTH, ITEM_HEIGHT
+from ui_flow_layout import FlowLayout
 
 import icons
 from ui_video_player import OpenCVVideoPlayer, SingleMediaViewer
@@ -104,8 +105,7 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(10, 10, 10, 10)
         content_layout.setSpacing(10)
 
-        action_bar_layout = QHBoxLayout()
-        action_bar_layout.setSpacing(10)
+        action_bar_layout = FlowLayout(margin=0, spacing=10)
 
         ACTION_BAR_BUTTON_HEIGHT = 35
 
