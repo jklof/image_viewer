@@ -21,19 +21,27 @@ class CroppableLabel(QLabel):
         self.rubber_band.hide()
         self.origin = QPoint()
         self._is_selecting = False
+        self._shift_pressed = False
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.origin = event.pos()
-            self._is_selecting = False
-            # Accept event to prevent parent from starting drag immediately, 
-            # allowing us to handle drag vs click.
-            event.accept()
-        else:
-            super().mousePressEvent(event)
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Start crop selection if Shift is held
+                self.origin = event.pos()
+                self._is_selecting = False
+                self._shift_pressed = True
+                event.accept()
+                return
+            else:
+                # Without Shift, clear existing selection and allow drag-n-drop
+                self.clear_selection()
+                self._shift_pressed = False
+                event.ignore()
+                return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        if event.buttons() & Qt.MouseButton.LeftButton:
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._shift_pressed:
             # Only start drawing rubber band if moved past a threshold
             if not self._is_selecting and (event.pos() - self.origin).manhattanLength() > 5:
                 self._is_selecting = True
@@ -43,18 +51,20 @@ class CroppableLabel(QLabel):
             if self._is_selecting:
                 self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
                 event.accept()
-        else:
-            super().mouseMoveEvent(event)
+                return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self._is_selecting:
-                # It was just a click, clear selection
-                self.clear_selection()
-            self._is_selecting = False
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
+            if self._shift_pressed:
+                self._is_selecting = False
+                self._shift_pressed = False
+                event.accept()
+                return
+            else:
+                event.ignore()
+                return
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -68,6 +78,7 @@ class CroppableLabel(QLabel):
     def clear_selection(self):
         self.rubber_band.hide()
         self._is_selecting = False
+        self._shift_pressed = False
 
 
 class VideoWorkerThread(QThread):
