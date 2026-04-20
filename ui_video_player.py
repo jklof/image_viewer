@@ -195,6 +195,7 @@ class VideoWorkerThread(QThread):
             else:
                 # Loop video
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                QThread.msleep(16)  # Prevent busy loop at EOF
 
             # Sleep to match FPS if playing
             if is_playing and ret:
@@ -454,14 +455,10 @@ class OpenCVVideoPlayer(QWidget):
             if orig_img.isNull():
                 return None
         else:
-            # For video, use the current frame
+            # For video, use the current frame (already QImage)
             if self.current_frame is None:
                 return None
-            # Convert BGR to RGB
-            rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            orig_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+            orig_img = self.current_frame
 
         # Get the displayed scaled pixmap
         scaled_pixmap = self.video_label.pixmap()
@@ -516,14 +513,8 @@ class OpenCVVideoPlayer(QWidget):
         if self.current_frame is None:
             return None
 
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-
-        # Create QImage with copy to ensure Qt owns the memory
-        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        return QPixmap.fromImage(q_image)
+        # current_frame is always QImage
+        return QPixmap.fromImage(self.current_frame)
 
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled

@@ -1,5 +1,6 @@
 import yaml
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -16,37 +17,39 @@ DEFAULT_CONFIG = {
 }
 
 _CONFIG_CACHE = None
+_CONFIG_LOCK = threading.Lock()
 
 
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, force_reload: bool = False) -> dict:
     """Loads the configuration from a YAML file, applying defaults for missing keys."""
     global _CONFIG_CACHE
 
-    if _CONFIG_CACHE is not None and not force_reload:
-        return _CONFIG_CACHE.copy()
+    with _CONFIG_LOCK:
+        if _CONFIG_CACHE is not None and not force_reload:
+            return _CONFIG_CACHE.copy()
 
-    try:
-        with open(config_path, "r") as f:
-            user_config = yaml.safe_load(f)
-            if not isinstance(user_config, dict):
-                logger.warning(f"Config file '{config_path}' is malformed. Using a default.")
-                _CONFIG_CACHE = DEFAULT_CONFIG.copy()
-                return _CONFIG_CACHE.copy()
+        try:
+            with open(config_path, "r") as f:
+                user_config = yaml.safe_load(f)
+                if not isinstance(user_config, dict):
+                    logger.warning(f"Config file '{config_path}' is malformed. Using a default.")
+                    _CONFIG_CACHE = DEFAULT_CONFIG.copy()
+                    return _CONFIG_CACHE.copy()
 
-            # Merge user config with defaults, ensuring all keys are present
-            final_config = DEFAULT_CONFIG.copy()
-            final_config.update(user_config)
-            _CONFIG_CACHE = final_config.copy()
-            return final_config.copy()
+                # Merge user config with defaults, ensuring all keys are present
+                final_config = DEFAULT_CONFIG.copy()
+                final_config.update(user_config)
+                _CONFIG_CACHE = final_config.copy()
+                return final_config.copy()
 
-    except FileNotFoundError:
-        logger.info(f"Configuration file '{config_path}' not found. Creating a default one.")
-        save_config(DEFAULT_CONFIG, config_path)
-        return DEFAULT_CONFIG.copy()
-    except yaml.YAMLError as e:
-        logger.error(f"Error parsing YAML file '{config_path}': {e}")
-        _CONFIG_CACHE = DEFAULT_CONFIG.copy()
-        return _CONFIG_CACHE.copy()
+        except FileNotFoundError:
+            logger.info(f"Configuration file '{config_path}' not found. Creating a default one.")
+            save_config(DEFAULT_CONFIG, config_path)
+            return DEFAULT_CONFIG.copy()
+        except yaml.YAMLError as e:
+            logger.error(f"Error parsing YAML file '{config_path}': {e}")
+            _CONFIG_CACHE = DEFAULT_CONFIG.copy()
+            return _CONFIG_CACHE.copy()
 
 
 def save_config(config: dict, config_path: str = DEFAULT_CONFIG_PATH):

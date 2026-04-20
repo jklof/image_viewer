@@ -95,7 +95,7 @@ class BackendWorker:
 
                 error_msg = traceback.format_exc()
                 logger.error(f"--- AN UNHANDLED ERROR OCCURRED IN BACKEND WORKER LOOP ---\n{error_msg}")
-                # self.signals.error.emit(error_msg) # Optional: might cause loops if UI is dead
+                self.signals.warning.emit(str(e))
 
         logger.info("BackendWorker thread shutting down.")
 

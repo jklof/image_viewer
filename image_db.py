@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 HASHING_WORKER_COUNT = min(4, os.cpu_count() or 4)
 EMBEDDING_BATCH_SIZE = 64
 PIPELINE_QUEUE_SIZE = 256
+# SQLite default maximum variable limit is 999. Using 900 leaves a safe buffer
+# for additional parameters appended to queries (like tag_name in toggle_tag)
+# without hitting the SQLITE_MAX_VARIABLE_NUMBER limit.
 SQLITE_VARIABLE_LIMIT = 900
 MAX_IMAGE_PIXELS = 80 * 1000 * 1000
 PREPROCESS_TARGET_SIZE = (256, 256)  # Size for CLIP pre-processing
@@ -830,11 +833,18 @@ class ImageDatabase:
                 )
                 tagged_shas = {row[0] for row in cursor.fetchall()}
 
+                to_delete = []
+                to_insert = []
                 for sha in chunk:
                     if sha in tagged_shas:
-                        conn.execute("DELETE FROM tags WHERE sha256 = ? AND tag_name = ?", (sha, tag_name))
+                        to_delete.append((sha, tag_name))
                     else:
-                        conn.execute("INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", (sha, tag_name))
+                        to_insert.append((sha, tag_name))
+
+                if to_delete:
+                    conn.executemany("DELETE FROM tags WHERE sha256 = ? AND tag_name = ?", to_delete)
+                if to_insert:
+                    conn.executemany("INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", to_insert)
 
         # INVALIDATE CACHE so it rebuilds on next search
         self._sha_to_tags_cache = None
