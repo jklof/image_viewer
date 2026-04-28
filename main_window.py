@@ -578,7 +578,7 @@ class MainWindow(QMainWindow):
             cropped.save(str(temp_path), "PNG")
 
             # Add to query
-            self.query_builder.add_image_element(str(temp_path))
+            self.query_builder.add_image_element(str(temp_path), is_temp=True)
 
             # Clear selection
             self.single_image_view_widget.video_label.clear_selection()
@@ -615,5 +615,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.single_image_view_widget.cleanup()
+        import shutil, tempfile
+        shutil.rmtree(Path(tempfile.gettempdir()) / "ai_image_explorer_crops", ignore_errors=True)
         self.closing.emit()
         event.accept()

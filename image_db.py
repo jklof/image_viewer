@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+ALLOWED_TAGS = {"marked"}
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -816,6 +818,9 @@ class ImageDatabase:
         return sha256_list
 
     def toggle_tag(self, filepath_or_sha_list: list[str], tag_name: str = "marked"):
+        if tag_name not in ALLOWED_TAGS:
+            raise ValueError(f"Invalid tag: {tag_name}")
+            
         if not filepath_or_sha_list:
             return
 
@@ -850,6 +855,9 @@ class ImageDatabase:
         self._sha_to_tags_cache = None
 
     def untag_all(self, tag_name: str = "marked"):
+        if tag_name not in ALLOWED_TAGS:
+            raise ValueError(f"Invalid tag: {tag_name}")
+            
         with self._get_db_connection() as conn:
             conn.execute("DELETE FROM tags WHERE tag_name = ?", (tag_name,))
 

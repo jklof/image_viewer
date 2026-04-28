@@ -22,4 +22,5 @@ scipy   # For image_db.py distance calculation
 # These are required for the UMAP/HDBSCAN native visualization
 umap-learn
 hdbscan
-pyqtgraph 
+pyqtgraph
+scikit-learn

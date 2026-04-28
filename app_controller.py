@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Slot, Signal, QRunnable, QThreadPool
+from PySide6.QtCore import QObject, QThread, Slot, Signal
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from backend import BackendWorker, BackendSignals
@@ -56,6 +56,7 @@ class AppController(QObject):
         self._cached_visualization_data = None
         self._visualization_data_dirty = True
         self._tagged_only_filter = False
+        self._current_results_generation = 0
 
         self._connect_signals()
 
@@ -252,6 +253,7 @@ class AppController(QObject):
 
     @Slot(list)
     def on_results_ready(self, results: list):
+        self._current_results_generation += 1
         if not results:
             if self._tagged_only_filter:
                 self.window.show_no_tags_view()
@@ -392,10 +394,19 @@ class AppController(QObject):
         self.window.results_model.toggle_tag_for_filepaths(filepaths)
 
         # 2. Dispatch job to backend
-        self.backend_job_queue.put(("toggle_tags", {"filepath_list": filepaths, "tag_name": "marked"}))
+        self.backend_job_queue.put(("toggle_tags", {
+            "filepath_list": filepaths, 
+            "tag_name": "marked",
+            "generation": self._current_results_generation
+        }))
 
-    @Slot(list)
-    def on_tag_operation_failed(self, filepaths: list):
+    @Slot(list, int)
+    def on_tag_operation_failed(self, filepaths: list, generation: int):
+        if generation != self._current_results_generation:
+            # The model has been completely replaced since this request; 
+            # the optimistic UI state is gone, so no rollback needed.
+            return
+            
         self.window.update_status_bar("Database error: Failed to toggle tags. Rolling back.")
         # Toggling them a second time reverts the optimistic UI update
         self.window.results_model.toggle_tag_for_filepaths(filepaths)
@@ -492,10 +503,23 @@ class AppController(QObject):
         """Thread function to move files with collision handling."""
         moved_count = 0
         error_count = 0
+        
+        tracked_dirs = get_scan_directories()
 
         for filepath in filepaths:
             try:
                 src = Path(filepath)
+                
+                # Boundary check before destructive operation
+                src_resolved = src.resolve()
+                is_within_tracked = any(
+                    src_resolved.is_relative_to(Path(d).resolve()) or src_resolved == Path(d).resolve() for d in tracked_dirs
+                )
+                if not is_within_tracked:
+                    logger.warning(f"File {filepath} is outside tracked directories, skipping move.")
+                    error_count += 1
+                    continue
+
                 dest_dir = Path(destination)
                 dest_file = dest_dir / src.name
 
@@ -583,9 +607,21 @@ class AppController(QObject):
         deleted_count = 0
         error_count = 0
         deleted_filepaths = []
+        
+        tracked_dirs = get_scan_directories()
 
         for filepath in filepaths:
             try:
+                # Boundary check before destructive operation
+                src = Path(filepath).resolve()
+                is_within_tracked = any(
+                    src.is_relative_to(Path(d).resolve()) or src == Path(d).resolve() for d in tracked_dirs
+                )
+                if not is_within_tracked:
+                    logger.warning(f"File {filepath} is outside tracked directories, skipping deletion.")
+                    error_count += 1
+                    continue
+
                 os.remove(filepath)
                 deleted_count += 1
                 deleted_filepaths.append(filepath)

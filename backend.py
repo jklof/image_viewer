@@ -25,7 +25,7 @@ class BackendSignals(QObject):
     results_ready = Signal(list)
     status_update = Signal(str)
     visualization_data_ready = Signal(list)
-    tag_operation_failed = Signal(list)
+    tag_operation_failed = Signal(list, int)
 
 
 class BackendWorker:
@@ -250,6 +250,7 @@ class BackendWorker:
     def handle_toggle_tags(self, payload: dict):
         filepaths = payload.get("filepath_list", [])
         tag_name = payload.get("tag_name", "marked")
+        generation = payload.get("generation", 0)
         try:
             if not self.db:
                 return
@@ -259,7 +260,7 @@ class BackendWorker:
         except Exception:
             logger.error(traceback.format_exc())
             # Emit the failed filepaths back to the UI for rollback
-            self.signals.tag_operation_failed.emit(filepaths)
+            self.signals.tag_operation_failed.emit(filepaths, generation)
 
     def handle_untag_all(self, payload: dict):
         try:

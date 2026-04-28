@@ -227,6 +227,7 @@ class OpenCVVideoPlayer(QWidget):
         self.current_frame_idx = 0
         self.is_playing = False
         self.current_frame = None  # Store current frame for extraction
+        self._cached_image_pixmap = QPixmap()
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 0, 10, 0)
@@ -350,10 +351,12 @@ class OpenCVVideoPlayer(QWidget):
 
         if current_path.lower().endswith(".mp4"):
             self.video_controls.show()
+            self._cached_image_pixmap = QPixmap()
             self._load_video(current_path)
         else:
             self.video_controls.hide()
             pixmap = QPixmap(current_path)
+            self._cached_image_pixmap = pixmap
             if not pixmap.isNull():
                 self._display_pixmap(pixmap, is_video=False)
             else:
@@ -421,23 +424,6 @@ class OpenCVVideoPlayer(QWidget):
 
         scaled = pixmap.scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio, transform_mode)
         self.video_label.setPixmap(scaled)
-
-    def _display_frame(self, frame):
-        """Convert OpenCV frame to QPixmap and display it."""
-        self.current_frame = frame.copy()  # Store original BGR for extraction
-
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-
-        # .copy() is CRITICAL here so Qt maintains ownership of the memory
-        # when the Python numpy array is garbage collected!
-        q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(q_image)
-
-        # Display as video (FastTransformation for CPU efficiency)
-        self._display_pixmap(pixmap, is_video=True)
 
 
     def get_cropped_image(self) -> QImage | None:
@@ -519,11 +505,11 @@ class OpenCVVideoPlayer(QWidget):
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
         if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
-            pixmap = QPixmap(self.current_filepath)
-            if not pixmap.isNull():
-                self._display_pixmap(pixmap, is_video=False)
+            if not self._cached_image_pixmap.isNull():
+                self._display_pixmap(self._cached_image_pixmap, is_video=False)
         elif self.current_frame is not None:
-            self._display_frame(self.current_frame)
+            pixmap = QPixmap.fromImage(self.current_frame)
+            self._display_pixmap(pixmap, is_video=True)
 
         if self._tag_overlay.isVisible():
             self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)

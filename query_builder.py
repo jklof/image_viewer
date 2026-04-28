@@ -255,8 +255,9 @@ class UniversalQueryBuilder(QWidget):
         if filepath:
             self.add_image_element(filepath)
 
-    def add_image_element(self, filepath: str):
+    def add_image_element(self, filepath: str, is_temp: bool = False):
         element = QueryElementWidget("image", filepath)
+        element._is_temp_file = is_temp
         self._add_element_widget(element)
 
     def _add_element_widget(self, element_widget: QueryElementWidget):
@@ -267,6 +268,11 @@ class UniversalQueryBuilder(QWidget):
 
     @Slot(object)
     def remove_element(self, element_widget: QueryElementWidget):
+        if getattr(element_widget, '_is_temp_file', False):
+            try:
+                Path(element_widget.value).unlink(missing_ok=True)
+            except OSError:
+                pass
         element_widget.deleteLater()
         self._check_search_button_state()
 
@@ -275,7 +281,13 @@ class UniversalQueryBuilder(QWidget):
         for i in reversed(range(self.element_list_layout.count())):
             item = self.element_list_layout.itemAt(i)
             if item and isinstance(item.widget(), QueryElementWidget):
-                item.widget().deleteLater()
+                widget = item.widget()
+                if getattr(widget, '_is_temp_file', False):
+                    try:
+                        Path(widget.value).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                widget.deleteLater()
                 self.element_list_layout.takeAt(i)
         self._check_search_button_state()
 
