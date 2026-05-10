@@ -17,7 +17,7 @@ DEFAULT_CONFIG = {
 }
 
 _CONFIG_CACHE = None
-_CONFIG_LOCK = threading.Lock()
+_CONFIG_LOCK = threading.RLock()
 
 
 def load_config(config_path: str = DEFAULT_CONFIG_PATH, force_reload: bool = False) -> dict:

@@ -188,7 +188,7 @@ class LoaderManager(QObject):
             self.pending_jobs.add(filepath)
 
             # Increment to ensure this new task gets the highest execution priority
-            self._task_counter += 1
+            self._task_counter = (self._task_counter + 1) % 1000000
             current_priority = self._task_counter
 
         task = LoadThumbnailTask(filepath, self)
@@ -220,11 +220,13 @@ class LoaderManager(QObject):
 
 
 _loader_manager_instance = None
+_loader_manager_lock = threading.Lock()
 
 
 def get_loader_manager() -> LoaderManager:
     """Lazily instantiate LoaderManager to ensure QApplication exists first."""
     global _loader_manager_instance
-    if _loader_manager_instance is None:
-        _loader_manager_instance = LoaderManager()
-    return _loader_manager_instance
+    with _loader_manager_lock:
+        if _loader_manager_instance is None:
+            _loader_manager_instance = LoaderManager()
+        return _loader_manager_instance

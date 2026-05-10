@@ -59,6 +59,9 @@ class SyncWorker(QObject):
                 self._owns_embedder = True
 
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
+            # Check model compatibility but don't raise here; reconcile_database will handle it
+            if not self.db._verify_model_compatibility(raise_error=False):
+                logger.warning("Database model mismatch detected in SyncWorker. Reconciliation will handle the nuke.")
 
             if self._is_cancelled:
                 result, message = "cancelled", "Sync cancelled during initialization."

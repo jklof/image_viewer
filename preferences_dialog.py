@@ -142,10 +142,12 @@ class PreferencesDialog(QDialog):
 
         # Detect changes that require restart
         restart_needed = False
+        model_changed = False
         if new_db_path != self.current_config.get("database_path"):
             restart_needed = True
         if new_model != self.current_config.get("model_id"):
             restart_needed = True
+            model_changed = True
 
         # Update config dictionary
         self.current_config["directories"] = new_dirs
@@ -155,11 +157,11 @@ class PreferencesDialog(QDialog):
         save_config(self.current_config)
 
         if restart_needed:
-            QMessageBox.information(
-                self,
-                "Restart Required",
-                "You have changed settings (Database or Model) that require an application restart to take effect.",
-            )
+            msg = "You have changed settings (Database or Model) that require an application restart to take effect."
+            if model_changed:
+                msg += "\n\nWARNING: Changing the AI model will invalidate all existing embeddings. A full re-sync will be required, which will delete and re-generate the embedding database."
+            
+            QMessageBox.information(self, "Restart Required", msg)
 
         self.preferences_saved.emit(restart_needed)
         self.accept()

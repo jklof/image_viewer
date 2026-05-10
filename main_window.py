@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         self._set_initial_size()
         self.current_single_view_index = -1
         self._init_ui()
+        self._init_temp_dir()
         self._connect_ui_signals()
 
     def _set_initial_size(self):
@@ -88,6 +89,14 @@ class MainWindow(QMainWindow):
             self.setGeometry(50, 50, int(screen_geometry.width() * 0.8), int(screen_geometry.height() * 0.8))
         else:
             self.setGeometry(50, 50, 1200, 800)
+
+    def _init_temp_dir(self):
+        import tempfile
+        import uuid
+        self._session_id = uuid.uuid4().hex[:8]
+        self.temp_dir = Path(tempfile.gettempdir()) / f"ai_image_explorer_crops_{self._session_id}"
+        self.temp_dir.mkdir(exist_ok=True)
+        logger.info(f"Initialized session temp directory: {self.temp_dir}")
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -570,7 +579,7 @@ class MainWindow(QMainWindow):
             from pathlib import Path
 
             # Create temp directory for crops
-            temp_dir = Path(tempfile.gettempdir()) / "ai_image_explorer_crops"
+            temp_dir = self.temp_dir
             temp_dir.mkdir(exist_ok=True)
 
             # Save cropped image to temp file
@@ -615,7 +624,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.single_image_view_widget.cleanup()
-        import shutil, tempfile
-        shutil.rmtree(Path(tempfile.gettempdir()) / "ai_image_explorer_crops", ignore_errors=True)
+        import shutil
+        if hasattr(self, 'temp_dir') and self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+            logger.info(f"Cleaned up session temp directory: {self.temp_dir}")
         self.closing.emit()
         event.accept()

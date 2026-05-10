@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-ALLOWED_TAGS = {"marked"}
+ALLOWED_TAGS = frozenset({"marked"})
 
 from typing import TYPE_CHECKING
 
@@ -194,12 +194,6 @@ class EmbeddingConsumerThread(threading.Thread):
         except Exception as e:
             logger.error(f"Unhandled exception in EmbeddingConsumerThread: {e}", exc_info=True)
         finally:
-            if self.cancel_flag.is_set():
-                try:
-                    while not self.work_queue.empty():
-                        self.work_queue.get_nowait()
-                except Exception:
-                    pass
             if self.conn:
                 try:
                     self.conn.close()
@@ -300,7 +294,6 @@ class ImageDatabase:
             raise TypeError("ImageEmbedder is required.")
         self.db_path, self.embedder = db_path, embedder
         self._create_tables()
-        self._verify_model_compatibility()
         self._shas_in_order, self._embedding_matrix = [], None
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None  # NEW: Cache tags in RAM for instant searches
@@ -361,10 +354,13 @@ class ImageDatabase:
         with self._get_db_connection() as conn:
             conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, value))
 
-    def _verify_model_compatibility(self):
+    def _verify_model_compatibility(self, raise_error=True):
         db_model_id = self._get_metadata("model_id")
         if db_model_id and db_model_id != self.embedder.model_id:
-            raise self.ModelMismatchError(f"DB model is '{db_model_id}', but app is using '{self.embedder.model_id}'.")
+            if raise_error:
+                raise self.ModelMismatchError(f"DB model is '{db_model_id}', but app is using '{self.embedder.model_id}'.")
+            return False
+        return True
 
     def reconcile_database(self, configured_dirs: list[str], progress_callback=None, status_callback=None):
         self._cancel_flag.clear()
@@ -373,17 +369,20 @@ class ImageDatabase:
             if self._cancel_flag.is_set():
                 raise self.InterruptedError("Sync cancelled.")
 
-        # Fetch existing SHAs to pass to workers for the fast-path check
-        with self._get_db_connection() as conn:
-            existing_shas = {row[0] for row in conn.execute("SELECT sha256 FROM embeddings").fetchall()}
-
-        executor = concurrent.futures.ProcessPoolExecutor(
-            max_workers=HASHING_WORKER_COUNT, initializer=_init_worker, initargs=(existing_shas,)
-        )
+        executor = None
         try:
             logger.info("Starting database synchronization...")
             self._reconcile_model_id()
             _check_cancelled()
+
+            # Fetch existing SHAs to pass to workers for the fast-path check
+            # MUST be done AFTER _reconcile_model_id to avoid stale cache
+            with self._get_db_connection() as conn:
+                existing_shas = {row[0] for row in conn.execute("SELECT sha256 FROM embeddings").fetchall()}
+
+            executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=HASHING_WORKER_COUNT, initializer=_init_worker, initargs=(existing_shas,)
+            )
 
             if status_callback:
                 status_callback("Discovering files...")
@@ -411,17 +410,20 @@ class ImageDatabase:
             logger.warning(f"Synchronization cancelled by user: {e}")
             raise
         finally:
-            try:
-                executor.shutdown(wait=True, cancel_futures=True)
-            except Exception as e:
-                logger.warning(f"Executor took too long to shutdown: {e}")
+            if executor:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception as e:
+                    logger.warning(f"Executor took too long to shutdown: {e}")
                 # Allow program to continue even if shutdown hangs
 
     def _reconcile_model_id(self):
         db_model_id, config_model_id = self._get_metadata("model_id"), self.embedder.model_id
         if db_model_id != config_model_id:
             if db_model_id is not None:
+                logger.warning(f"Model ID mismatch (DB: {db_model_id}, Config: {config_model_id}). Nuking embeddings for full re-sync.")
                 with self._get_db_connection() as conn:
+                    conn.execute("DELETE FROM filepaths")  # Force re-discovery/hashing
                     conn.execute("DELETE FROM embeddings")
                     conn.execute("DELETE FROM visualization")
             self._set_metadata("model_id", config_model_id)
@@ -833,23 +835,30 @@ class ImageDatabase:
                 chunk = sha256_list[i : i + SQLITE_VARIABLE_LIMIT]
                 placeholders = ", ".join("?" for _ in chunk)
 
+                # Find which of these are already tagged
                 cursor = conn.execute(
                     f"SELECT sha256 FROM tags WHERE sha256 IN ({placeholders}) AND tag_name = ?", chunk + [tag_name]
                 )
                 tagged_shas = {row[0] for row in cursor.fetchall()}
 
-                to_delete = []
-                to_insert = []
-                for sha in chunk:
-                    if sha in tagged_shas:
-                        to_delete.append((sha, tag_name))
-                    else:
-                        to_insert.append((sha, tag_name))
+                # Determine which to add and which to remove
+                to_remove_shas = [sha for sha in chunk if sha in tagged_shas]
+                to_add_shas = [sha for sha in chunk if sha not in tagged_shas]
 
-                if to_delete:
-                    conn.executemany("DELETE FROM tags WHERE sha256 = ? AND tag_name = ?", to_delete)
-                if to_insert:
-                    conn.executemany("INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", to_insert)
+                if to_remove_shas:
+                    # Bulk delete
+                    rm_placeholders = ", ".join("?" for _ in to_remove_shas)
+                    conn.execute(
+                        f"DELETE FROM tags WHERE tag_name = ? AND sha256 IN ({rm_placeholders})", 
+                        [tag_name] + to_remove_shas
+                    )
+
+                if to_add_shas:
+                    # Bulk insert
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO tags (sha256, tag_name) VALUES (?, ?)", 
+                        [(sha, tag_name) for sha in to_add_shas]
+                    )
 
         # INVALIDATE CACHE so it rebuilds on next search
         self._sha_to_tags_cache = None

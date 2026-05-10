@@ -92,6 +92,7 @@ class AppController(QObject):
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
+        self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
 
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
@@ -144,17 +145,19 @@ class AppController(QObject):
         if self.sync_thread and self.sync_thread.isRunning():
             logger.info("Cancelling active sync operation for soft restart...")
             self.on_sync_cancel_requested()
-            self.sync_thread.quit()
-            if not self.sync_thread.wait(5000):  # Wait up to 5 seconds
+            # Wait for sync thread to fully terminate to avoid embedder race
+            if not self.sync_thread.wait(15000):  # Wait up to 15 seconds
                 logger.warning("Sync thread did not exit gracefully, forcing termination")
                 self.sync_thread.terminate()
+                self.sync_thread.wait() # Ensure it's dead
             self.sync_thread = None
             self.sync_worker = None
 
         # Shutdown current backend
         logger.info("Shutting down current backend worker...")
         self.backend_worker.shutdown()
-        self.backend_thread.join(timeout=5)
+        # Ensure backend thread is fully joined before proceeding
+        self.backend_thread.join(timeout=10)
 
         # Check if backend thread is still alive (race condition protection)
         if self.backend_thread.is_alive():
@@ -174,7 +177,7 @@ class AppController(QObject):
         self.backend_thread = threading.Thread(target=self.backend_worker.run, daemon=True)
 
         # Reconnect signals for the new backend
-        self._connect_backend_signals(old_signals=old_signals)
+        self._connect_backend_signals()
 
         # Restart backend thread
         logger.info("Starting new backend worker thread...")
@@ -186,7 +189,7 @@ class AppController(QObject):
 
         logger.info("Soft restart completed successfully.")
 
-    def _connect_backend_signals(self, old_signals=None):
+    def _connect_backend_signals(self):
         """Reconnect backend signals after soft restart."""
         # Connect new backend signals
         self.backend_signals.initialized.connect(self.on_backend_initialized)
@@ -197,6 +200,7 @@ class AppController(QObject):
         self.backend_signals.visualization_data_ready.connect(self.on_visualization_data_ready)
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
+        self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
 
     @Slot()
     def on_backend_initialized(self):
@@ -253,7 +257,7 @@ class AppController(QObject):
 
     @Slot(list)
     def on_results_ready(self, results: list):
-        self._current_results_generation += 1
+        self._current_results_generation = (self._current_results_generation + 1) % 1000000
         if not results:
             if self._tagged_only_filter:
                 self.window.show_no_tags_view()
@@ -600,7 +604,8 @@ class AppController(QObject):
 
         self.window.results_model.set_results(new_results)
         self.window.update_status_bar(message)
-        self.window.set_controls_enabled(True)
+        # We DON'T enable controls here, because the DB deletion job might still be in the backend queue.
+        # We wait for on_backend_deletion_completed.
 
     def _delete_files_thread(self, filepaths: list[str]):
         """Thread function to delete files."""
@@ -653,3 +658,8 @@ class AppController(QObject):
         self.window.show_loading_state("Filtering..." if checked else "Loading all images...")
         self.window.set_controls_enabled(False)
         self.backend_job_queue.put(("random_search", {"tagged_only": checked}))
+
+    @Slot()
+    def on_backend_deletion_completed(self):
+        logger.info("Backend finished DB deletion job.")
+        self.window.set_controls_enabled(True)

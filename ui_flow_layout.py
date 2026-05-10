@@ -81,7 +81,9 @@ class FlowLayout(QLayout):
         current_line_width = 0
 
         for item in self.itemList:
-            if item.widget() and item.widget().isHidden():
+            # Skip hidden widgets. Spacers/Layouts are always included.
+            widget = item.widget()
+            if widget and widget.isHidden():
                 continue
 
             # Spacers have 0 width in sizeHint() usually if not Fixed, but expanding

@@ -1,6 +1,7 @@
 import logging
 import traceback
 import queue
+import threading
 from pathlib import Path
 import random
 
@@ -26,6 +27,7 @@ class BackendSignals(QObject):
     status_update = Signal(str)
     visualization_data_ready = Signal(list)
     tag_operation_failed = Signal(list, int)
+    deletion_completed = Signal()
 
 
 class BackendWorker:
@@ -40,7 +42,7 @@ class BackendWorker:
         self.use_cpu_only = use_cpu_only
         self.db: ImageDatabase | None = None
         self.embedder: ImageEmbedder | None = None
-        self._shutdown = False
+        self._shutdown_event = threading.Event()
 
     def run(self):
         """The main loop for the worker thread."""
@@ -57,6 +59,7 @@ class BackendWorker:
 
             self.signals.status_update.emit("Connecting to database...")
             self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
+            self.db._verify_model_compatibility()
             logger.info("Backend initialized successfully.")
             self.signals.initialized.emit()
         except (KeyboardInterrupt, SystemExit):
@@ -68,7 +71,7 @@ class BackendWorker:
             return  # Exit thread on catastrophic failure
 
         # --- 2. Job Processing Loop ---
-        while not self._shutdown:
+        while not self._shutdown_event.is_set():
             try:
                 # Wait for a job to appear on the queue
                 try:
@@ -90,7 +93,7 @@ class BackendWorker:
                 break
             except Exception as e:
                 # Catch generic errors in the loop to keep thread alive
-                if self._shutdown:
+                if self._shutdown_event.is_set():
                     break  # Ignore errors if we are shutting down
 
                 error_msg = traceback.format_exc()
@@ -220,7 +223,7 @@ class BackendWorker:
 
             # Check if shutdown requested during long op
             def check_stop():
-                if self._shutdown:
+                if self._shutdown_event.is_set():
                     raise Exception("Backend shutdown requested")
 
             self.signals.status_update.emit("Checking visualization data integrity...")
@@ -233,9 +236,10 @@ class BackendWorker:
             self.signals.status_update.emit("Loading visualization data...")
             plot_data = self.db.get_visualization_data()
             self.signals.visualization_data_ready.emit(plot_data or [])
-        except Exception:
-            # Log but don't crash thread; the UI will just stay in loading state or user can try again
+        except Exception as e:
+            # Log and notify UI
             logger.error(traceback.format_exc())
+            self.signals.warning.emit(f"Visualization failed: {str(e)}")
 
     def handle_reload(self, _):
         try:
@@ -280,11 +284,12 @@ class BackendWorker:
             if filepath_list:
                 self.db.delete_target_filepaths(filepath_list)
                 logger.info(f"Deleted {len(filepath_list)} filepaths from database.")
+                self.signals.deletion_completed.emit()
         except Exception:
             logger.error(traceback.format_exc())
 
     def shutdown(self):
-        self._shutdown = True
+        self._shutdown_event.set()
         try:
             self.job_queue.put(("shutdown", None), block=False)
         except (queue.Full, Exception):

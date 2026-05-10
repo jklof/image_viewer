@@ -221,7 +221,6 @@ class OpenCVVideoPlayer(QWidget):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.current_filepath = None
-        self.video_capture = None
         self.video_fps = 30.0
         self.total_frames = 0
         self.current_frame_idx = 0
@@ -338,11 +337,8 @@ class OpenCVVideoPlayer(QWidget):
         self.prev_btn.set_filepath(prev_path)
         self.next_btn.set_filepath(next_path)
 
-        # Stop playback and release any existing capture before loading new media
+        # Stop playback before loading new media
         self._stop_playback()
-        if self.video_capture is not None:
-            self.video_capture.release()
-            self.video_capture = None
 
         if not current_path:
             self.video_label.setPixmap(QPixmap())
@@ -579,9 +575,6 @@ class OpenCVVideoPlayer(QWidget):
     def stop_media(self):
         """Stop video playback when navigating away."""
         self._stop_playback()
-        if self.video_capture is not None:
-            self.video_capture.release()
-            self.video_capture = None
 
     def cleanup(self):
         """Clean up resources."""
