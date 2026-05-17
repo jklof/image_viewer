@@ -12,13 +12,7 @@ The project is an "AI Image Explorer," a desktop application built with PySide6.
 
 **1. Install Dependencies**
 
-pip
-
-```bash
-pip install -r requirements.txt
-```
-
-or conda
+Use conda
 
 ```bash
 conda env create -f environment.yml
