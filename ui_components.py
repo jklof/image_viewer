@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QListView
 from PySide6.QtGui import QPixmap, QPainter, QFont, QColor, QPen, QBrush
 from PySide6.QtCore import Qt, QSize, QRect, QTimer
 
-from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
+from constants import THUMBNAIL_SIZE, ITEM_WIDTH, ITEM_HEIGHT, FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE, DUP_COUNT_ROLE
 
 
 def create_placeholder_pixmap() -> QPixmap:
@@ -65,6 +65,14 @@ class SearchResultDelegate(QStyledItemDelegate):
         self.tag_badge_font = QFont()
         self.tag_badge_font.setBold(True)
         self.tag_badge_font.setPointSize(12)
+
+        # Dup badge resources
+        self.dup_badge_brush = QBrush(QColor(50, 130, 220, 210))   # blue
+        self.dup_badge_pen = QPen(QColor(255, 255, 255))            # white text
+        self.dup_badge_text_pen = QPen(QColor(255, 255, 255))
+        self.dup_badge_font = QFont()
+        self.dup_badge_font.setBold(True)
+        self.dup_badge_font.setPointSize(9)
 
         self._size_hint = QSize(ITEM_WIDTH, ITEM_HEIGHT)
 
@@ -147,5 +155,24 @@ class SearchResultDelegate(QStyledItemDelegate):
             fm = painter.fontMetrics()
             elided_text = fm.elidedText(filename, Qt.TextElideMode.ElideRight, filename_rect.width())
             painter.drawText(filename_rect, Qt.AlignmentFlag.AlignCenter, elided_text)
+
+        # Draw dup badge if image has duplicates
+        dup_count = index.data(DUP_COUNT_ROLE)
+        if dup_count and dup_count > 1:
+            label = f"\u00d7{dup_count}"
+            painter.setFont(self.dup_badge_font)
+            fm = painter.fontMetrics()
+            text_w = fm.horizontalAdvance(label)
+            badge_w = text_w + 10
+            badge_h = 18
+            badge_x = item_rect.left() + 5
+            badge_y = item_rect.bottom() - badge_h - 22  # above the filename row
+
+            badge_rect = QRect(badge_x, badge_y, badge_w, badge_h)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self.dup_badge_brush)
+            painter.drawRoundedRect(badge_rect, 4, 4)
+            painter.setPen(self.dup_badge_text_pen)
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
 
         painter.restore()

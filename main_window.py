@@ -24,6 +24,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -46,11 +47,12 @@ from PySide6.QtWidgets import (
 from query_builder import UniversalQueryBuilder
 from qt_visualizer import QtVisualizer
 from loading_spinner import PulsingSpinner
+from duplicate_manager import DuplicateManagerDialog
 from ui_components import SearchResultDelegate, FILEPATH_ROLE, TAGS_ROLE, SmoothListView
+from constants import ITEM_WIDTH, ITEM_HEIGHT, DUP_COUNT_ROLE
 from virtual_model import ImageResultModel
 from loader_manager import get_loader_manager, thumbnail_cache
 from preferences_dialog import PreferencesDialog
-from constants import ITEM_WIDTH, ITEM_HEIGHT
 from ui_flow_layout import FlowLayout
 
 import icons
@@ -72,6 +74,8 @@ class MainWindow(QMainWindow):
     untag_all_requested = Signal()
     move_tagged_requested = Signal()
     delete_tagged_requested = Signal()
+    dedup_info_requested = Signal(str)   # filepath
+    manage_duplicates_requested = Signal(list)   # list[str] filepaths to delete
 
     def __init__(self):
         super().__init__()
@@ -390,6 +394,20 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentWidget(self.results_view)
         self._update_toggle_view_button_state()
 
+    def get_scroll_state(self) -> tuple[int, int]:
+        bar = self.results_view.verticalScrollBar()
+        return bar.value(), bar.maximum()
+
+    def restore_scroll_state(self, value: int, maximum: int):
+        bar = self.results_view.verticalScrollBar()
+        if maximum > 0 and bar.maximum() > 0:
+            ratio = value / maximum
+            bar.setValue(int(ratio * bar.maximum()))
+        elif bar.maximum() > 0:
+            bar.setValue(min(value, bar.maximum()))
+        else:
+            bar.setValue(0)
+
     def show_visualizer_view(self):
         self.loading_spinner.stop_animation()
         self.content_stack.setCurrentWidget(self.visualizer_widget)
@@ -418,7 +436,7 @@ class MainWindow(QMainWindow):
     def show_critical_error(self, title: str, message: str):
         QMessageBox.critical(self, title, message)
 
-    def _create_context_menu(self, filepath: str) -> QMenu:
+    def _create_context_menu(self, filepath: str, dup_count: int = 1) -> QMenu:
         context_menu = QMenu(self)
         add_pos_action = QAction("Add to Query (+)", self)
         add_pos_action.triggered.connect(lambda: self.query_builder.add_image_element(filepath))
@@ -427,6 +445,14 @@ class MainWindow(QMainWindow):
         toggle_tag_action = QAction("Toggle Tag (T)", self)
         toggle_tag_action.triggered.connect(self._toggle_tag_for_selection)
         context_menu.addAction(toggle_tag_action)
+
+        if dup_count and dup_count > 1:
+            context_menu.addSeparator()
+            manage_action = QAction(f"Manage {dup_count} duplicates\u2026", self)
+            manage_action.triggered.connect(
+                lambda: self._open_duplicate_manager(filepath)
+            )
+            context_menu.addAction(manage_action)
 
         context_menu.addSeparator()
         copy_path_action = QAction("Copy Full Path", self)
@@ -456,15 +482,18 @@ class MainWindow(QMainWindow):
         if not index.isValid():
             return
         filepath = index.data(FILEPATH_ROLE)
-        context_menu = self._create_context_menu(filepath)
+        dup_count = index.data(DUP_COUNT_ROLE) or 1
+        context_menu = self._create_context_menu(filepath, dup_count)
         context_menu.exec(self.results_view.viewport().mapToGlobal(pos))
 
     @Slot(QPoint)
     def on_single_view_context_menu(self, pos: QPoint):
         if self.current_single_view_index < 0:
             return
-        _, filepath, _ = self.results_model.results_data[self.current_single_view_index]
-        context_menu = self._create_context_menu(filepath)
+        row_data = self.results_model.results_data[self.current_single_view_index]
+        filepath = row_data[1]
+        dup_count = row_data[3] if len(row_data) > 3 else 1
+        context_menu = self._create_context_menu(filepath, dup_count)
         context_menu.exec(self.single_image_view_widget.video_label.mapToGlobal(pos))
 
     @Slot(QModelIndex)
@@ -479,15 +508,15 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < total_count):
             return
 
-        _, current_filepath, _ = self.results_model.results_data[self.current_single_view_index]
+        current_filepath = self.results_model.results_data[self.current_single_view_index][1]
 
         prev_filepath = None
         if self.current_single_view_index > 0:
-            _, prev_filepath, _ = self.results_model.results_data[self.current_single_view_index - 1]
+            prev_filepath = self.results_model.results_data[self.current_single_view_index - 1][1]
 
         next_filepath = None
         if self.current_single_view_index < total_count - 1:
-            _, next_filepath, _ = self.results_model.results_data[self.current_single_view_index + 1]
+            next_filepath = self.results_model.results_data[self.current_single_view_index + 1][1]
 
         self.single_image_view_widget.set_media_data(current_filepath, prev_filepath, next_filepath)
 
@@ -499,7 +528,7 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < self.results_model.rowCount()):
             self.single_image_view_widget.set_tag_state(False)
             return
-        _, _, tags = self.results_model.results_data[self.current_single_view_index]
+        tags = self.results_model.results_data[self.current_single_view_index][2]
         self.single_image_view_widget.set_tag_state("marked" in tags)
 
     def _show_current_single_image(self):
@@ -607,6 +636,22 @@ class MainWindow(QMainWindow):
         selected_indexes = self.results_view.selectionModel().selectedIndexes()
         if selected_indexes:
             self.toggle_tags_requested.emit(selected_indexes)
+
+    def _open_duplicate_manager(self, filepath: str):
+        """Request duplicate paths from the backend, then open the manager dialog."""
+        # Store pending filepath; the backend will respond via duplicate_paths_ready signal
+        self._pending_dedup_filepath = filepath
+        # Emit via the controller's job queue (connected in _connect_ui_signals)
+        self.dedup_info_requested.emit(filepath)
+
+    @Slot(list)
+    def _on_duplicate_paths_ready(self, duplicate_info: list):
+        if not duplicate_info or len(duplicate_info) <= 1:
+            return  # nothing to manage
+
+        dlg = DuplicateManagerDialog(duplicate_info, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.filepaths_to_delete:
+            self.manage_duplicates_requested.emit(dlg.filepaths_to_delete)
 
     @Slot(QModelIndex, QModelIndex, list)
     def _on_model_data_changed(self, top_left, bottom_right, roles):

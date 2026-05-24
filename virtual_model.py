@@ -2,7 +2,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Slot, QMimeData,
 import logging
 import collections
 
-from constants import FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE
+from constants import FILEPATH_ROLE, SCORE_ROLE, TAGS_ROLE, DUP_COUNT_ROLE
 from loader_manager import get_loader_manager, thumbnail_cache
 from ui_components import create_placeholder_pixmap
 
@@ -33,7 +33,7 @@ class ImageResultModel(QAbstractListModel):
         if row >= len(self.results_data):
             return None
 
-        score, filepath, tags = self.results_data[row]
+        score, filepath, tags = self.results_data[row][:3]
 
         if role == SCORE_ROLE:
             return score
@@ -41,6 +41,11 @@ class ImageResultModel(QAbstractListModel):
             return filepath
         if role == TAGS_ROLE:
             return "marked" in tags
+
+        if role == DUP_COUNT_ROLE:
+            # result tuple is (score, filepath, tags, dup_count)
+            # guard against old 3-tuples during transition
+            return self.results_data[row][3] if len(self.results_data[row]) > 3 else 1
 
         if role == Qt.ItemDataRole.DecorationRole:
             # 1. Fast Path: Check Cache
@@ -91,7 +96,8 @@ class ImageResultModel(QAbstractListModel):
         self.results_data = results
         # Map filepath to list of row indices to handle duplicate filepaths
         self._filepath_to_row_map = collections.defaultdict(list)
-        for i, (_, filepath, _) in enumerate(results):
+        for i, item in enumerate(results):
+            filepath = item[1]
             self._filepath_to_row_map[filepath].append(i)
         self.endResetModel()
 
@@ -108,7 +114,9 @@ class ImageResultModel(QAbstractListModel):
             rows = self._filepath_to_row_map.get(filepath, [])
             for row in rows:
                 if 0 <= row < len(self.results_data):
-                    score, fp, tags = self.results_data[row]
+                    item = self.results_data[row]
+                    score, fp, tags = item[0], item[1], item[2]
+                    dup_count = item[3] if len(item) > 3 else 1
 
                     # Convert to set for safer manipulation (Also fixes Issue #6)
                     tag_set = set(tags.split(",")) if tags else set()
@@ -119,6 +127,6 @@ class ImageResultModel(QAbstractListModel):
 
                     new_tags = ",".join(filter(None, tag_set))
 
-                    self.results_data[row] = (score, fp, new_tags)
+                    self.results_data[row] = (score, fp, new_tags, dup_count)
                     index = self.createIndex(row, 0)
                     self.dataChanged.emit(index, index, [TAGS_ROLE])

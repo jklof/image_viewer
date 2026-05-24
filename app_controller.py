@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Slot, Signal
+from PySide6.QtCore import QObject, QThread, Slot, Signal, QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from backend import BackendWorker, BackendSignals
@@ -57,6 +57,7 @@ class AppController(QObject):
         self._visualization_data_dirty = True
         self._tagged_only_filter = False
         self._current_results_generation = 0
+        self._pending_scroll_state = None
 
         self._connect_signals()
 
@@ -93,6 +94,11 @@ class AppController(QObject):
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
         self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
+        self.backend_signals.duplicate_paths_ready.connect(self.window._on_duplicate_paths_ready)
+
+        # Duplicate management
+        self.window.dedup_info_requested.connect(self.on_dedup_info_requested)
+        self.window.manage_duplicates_requested.connect(self.on_manage_duplicates_requested)
 
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
@@ -116,6 +122,8 @@ class AppController(QObject):
             signals.visualization_data_ready.disconnect(self.on_visualization_data_ready)
             signals.reloaded.disconnect(self.on_backend_reloaded)
             signals.tag_operation_failed.disconnect(self.on_tag_operation_failed)
+            signals.deletion_completed.disconnect(self.on_backend_deletion_completed)
+            signals.duplicate_paths_ready.disconnect(self.window._on_duplicate_paths_ready)
         except (RuntimeError, AttributeError):
             pass  # Ignore disconnection errors
 
@@ -201,6 +209,11 @@ class AppController(QObject):
         self.backend_signals.reloaded.connect(self.on_backend_reloaded)
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
         self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
+        self.backend_signals.duplicate_paths_ready.connect(self.window._on_duplicate_paths_ready)
+
+        # Duplicate management
+        self.window.dedup_info_requested.connect(self.on_dedup_info_requested)
+        self.window.manage_duplicates_requested.connect(self.on_manage_duplicates_requested)
 
     @Slot()
     def on_backend_initialized(self):
@@ -270,6 +283,11 @@ class AppController(QObject):
         self.window.update_status_bar(f"Ordering complete. Displaying all {len(results)} images.")
         self.window.set_controls_enabled(True)
         self.window.set_sync_controls_enabled(True)
+
+        if self._pending_scroll_state is not None:
+            val, max_val = self._pending_scroll_state
+            QTimer.singleShot(50, lambda: self.window.restore_scroll_state(val, max_val))
+            self._pending_scroll_state = None
 
     @Slot(list)
     def on_visualization_data_ready(self, plot_data: list):
@@ -388,8 +406,8 @@ class AppController(QObject):
         for index in indices:
             row = index.row()
             if 0 <= row < len(self.window.results_model.results_data):
-                _, filepath, _ = self.window.results_model.results_data[row]
-                filepaths.append(filepath)
+                item = self.window.results_model.results_data[row]
+                filepaths.append(item[1])
 
         if not filepaths:
             return
@@ -449,7 +467,9 @@ class AppController(QObject):
 
         # Get tagged filepaths from the model
         tagged_filepaths = []
-        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+        for item in self.window.results_model.results_data:
+            filepath = item[1]
+            tags = item[2]
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
 
@@ -516,9 +536,16 @@ class AppController(QObject):
                 
                 # Boundary check before destructive operation
                 src_resolved = src.resolve()
-                is_within_tracked = any(
-                    src_resolved.is_relative_to(Path(d).resolve()) or src_resolved == Path(d).resolve() for d in tracked_dirs
-                )
+                is_within_tracked = False
+                for d in tracked_dirs:
+                    try:
+                        d_resolved = Path(d).resolve()
+                        if src_resolved.is_relative_to(d_resolved) or src_resolved == d_resolved:
+                            is_within_tracked = True
+                            break
+                    except ValueError:
+                        continue
+
                 if not is_within_tracked:
                     logger.warning(f"File {filepath} is outside tracked directories, skipping move.")
                     error_count += 1
@@ -563,7 +590,9 @@ class AppController(QObject):
 
         # Get tagged filepaths from the model
         tagged_filepaths = []
-        for row, (_, filepath, tags) in enumerate(self.window.results_model.results_data):
+        for item in self.window.results_model.results_data:
+            filepath = item[1]
+            tags = item[2]
             if "marked" in tags:
                 tagged_filepaths.append(filepath)
 
@@ -594,16 +623,22 @@ class AppController(QObject):
 
     @Slot(list, str)
     def _on_delete_completed(self, deleted_filepaths: list, message: str):
+        # Save scroll state
+        scroll_val, scroll_max = self.window.get_scroll_state()
+
         # Filter results on main thread (safe access to GUI model)
         deleted_filepaths_set = set(deleted_filepaths)
         new_results = []
         for result in self.window.results_model.results_data:
-            _, filepath, _ = result
+            filepath = result[1]
             if filepath not in deleted_filepaths_set:
                 new_results.append(result)
 
         self.window.results_model.set_results(new_results)
         self.window.update_status_bar(message)
+
+        # Restore scroll state
+        self.window.restore_scroll_state(scroll_val, scroll_max)
         # We DON'T enable controls here, because the DB deletion job might still be in the backend queue.
         # We wait for on_backend_deletion_completed.
 
@@ -619,15 +654,22 @@ class AppController(QObject):
             try:
                 # Boundary check before destructive operation
                 src = Path(filepath).resolve()
-                is_within_tracked = any(
-                    src.is_relative_to(Path(d).resolve()) or src == Path(d).resolve() for d in tracked_dirs
-                )
+                is_within_tracked = False
+                for d in tracked_dirs:
+                    try:
+                        d_resolved = Path(d).resolve()
+                        if src.is_relative_to(d_resolved) or src == d_resolved:
+                            is_within_tracked = True
+                            break
+                    except ValueError:
+                        continue
+
                 if not is_within_tracked:
                     logger.warning(f"File {filepath} is outside tracked directories, skipping deletion.")
                     error_count += 1
                     continue
 
-                os.remove(filepath)
+                os.remove(str(src))
                 deleted_count += 1
                 deleted_filepaths.append(filepath)
             except Exception as e:
@@ -659,7 +701,33 @@ class AppController(QObject):
         self.window.set_controls_enabled(False)
         self.backend_job_queue.put(("random_search", {"tagged_only": checked}))
 
+    @Slot(str)
+    def on_dedup_info_requested(self, filepath: str):
+        self.backend_job_queue.put(("get_duplicate_paths", {"filepath": filepath}))
+
+    @Slot(list)
+    def on_manage_duplicates_requested(self, filepaths: list):
+        if not filepaths:
+            return
+        if self.sync_thread and self.sync_thread.isRunning():
+            QMessageBox.warning(
+                self.window,
+                "Sync in progress",
+                "Cannot delete files while a sync is running.",
+            )
+            return
+        self._pending_scroll_state = self.window.get_scroll_state()
+        self.window.update_status_bar(f"Deleting {len(filepaths)} duplicate(s)\u2026")
+        self.window.set_controls_enabled(False)
+        import threading
+        t = threading.Thread(
+            target=self._delete_files_thread, args=(filepaths,), daemon=True
+        )
+        t.start()
+
     @Slot()
     def on_backend_deletion_completed(self):
         logger.info("Backend finished DB deletion job.")
         self.window.set_controls_enabled(True)
+        # Refresh results so dup_counts update after deletion
+        self.on_sort_by_date_requested()

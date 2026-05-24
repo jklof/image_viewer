@@ -297,6 +297,8 @@ class ImageDatabase:
         self._shas_in_order, self._embedding_matrix = [], None
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None  # NEW: Cache tags in RAM for instant searches
+        self._sha_to_dup_count_cache: dict[str, int] = {}
+        self._filepath_to_sha_cache: dict[str, str] = {}
         self._cancel_flag = threading.Event()
         self._load_embeddings_into_memory()
 
@@ -387,14 +389,21 @@ class ImageDatabase:
             if status_callback:
                 status_callback("Discovering files...")
             db_files = self._get_tracked_files_from_db()
-            disk_files = self._discover_files_on_disk(configured_dirs, status_callback, _check_cancelled)
+            disk_files, offline_dirs = self._discover_files_on_disk(configured_dirs, status_callback, _check_cancelled)
 
             _check_cancelled()
             if status_callback:
                 status_callback(f"Analyzing {len(disk_files)} files...")
 
-            changes = self._calculate_file_changes(db_files, disk_files)
+            changes = self._calculate_file_changes(db_files, disk_files, offline_dirs)
             logger.info(f"Found {len(changes['to_hash'])} to hash, {len(changes['removed'])} to remove.")
+
+            if changes["protected"]:
+                count = len(changes["protected"])
+                dirs = ", ".join(str(d) for d in changes["offline_dirs"])
+                logger.warning(f"Skipped deletion of {count} files from offline directories: {dirs}")
+                if status_callback:
+                    status_callback(f"⚠ Skipped {count} file(s) from offline drive(s): {dirs}")
 
             self._remove_deleted_files_from_db(changes["removed"], status_callback)
 
@@ -432,12 +441,16 @@ class ImageDatabase:
         with self._get_db_connection() as conn:
             return {r[0]: r[1] for r in conn.execute("SELECT filepath, mtime FROM filepaths").fetchall()}
 
-    def _discover_files_on_disk(self, configured_dirs, status_callback, check_cancelled) -> dict[str, float]:
+    def _discover_files_on_disk(self, configured_dirs, status_callback, check_cancelled) -> tuple[dict, set]:
         disk_files = {}
+        offline_dirs = set()
         for directory in configured_dirs:
             check_cancelled()
             path_obj = Path(directory)
             if not path_obj.is_dir():
+                offline_dirs.add(directory)
+                if status_callback:
+                    status_callback(f"⚠ Skipping offline directory: {directory}")
                 continue
             if status_callback:
                 status_callback(f"Scanning {directory}...")
@@ -449,12 +462,39 @@ class ImageDatabase:
                         disk_files[str(p.absolute())] = p.stat().st_mtime
                     except OSError:
                         continue
-        return disk_files
+        return disk_files, offline_dirs
 
-    def _calculate_file_changes(self, db_files, disk_files):
+    def _calculate_file_changes(self, db_files, disk_files, offline_dirs: set) -> dict:
         db_paths, disk_paths = set(db_files.keys()), set(disk_files.keys())
+        candidate_removed = db_paths - disk_paths
+        
+        # Exclude files that live under an offline directory
+        protected = set()
+        for filepath in candidate_removed:
+            fp_norm = Path(filepath).resolve()
+            for offline_dir in offline_dirs:
+                od_norm = Path(offline_dir).resolve()
+                try:
+                    if fp_norm.is_relative_to(od_norm):
+                        protected.add(filepath)
+                        break
+                except ValueError:
+                    pass
+                
+                # Double check with string case-insensitive prefix to be absolutely sure (especially on Windows)
+                fp_str = str(fp_norm).lower().replace('/', '\\')
+                od_str = str(od_norm).lower().replace('/', '\\')
+                if not od_str.endswith('\\'):
+                    od_str += '\\'
+                if fp_str.startswith(od_str):
+                    protected.add(filepath)
+                    break
+                    
+        actually_removed = candidate_removed - protected
         return {
-            "removed": db_paths - disk_paths,
+            "removed": actually_removed,
+            "protected": protected,
+            "offline_dirs": offline_dirs,
             "to_hash": (disk_paths - db_paths).union(
                 {p for p in disk_paths.intersection(db_paths) if disk_files[p] > db_files[p]}
             ),
@@ -523,6 +563,8 @@ class ImageDatabase:
     def _load_embeddings_into_memory(self):
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None  # Invalidate tag cache on reload
+        self._sha_to_dup_count_cache = {}
+        self._filepath_to_sha_cache = {}
         with self._get_db_connection() as conn:
             # Filter out the sentinel - its 1-byte blob cannot be reshaped to embedding dimensions
             rows = conn.execute(
@@ -720,10 +762,11 @@ class ImageDatabase:
             logger.error(f"Visualization update failed: {e}")
             raise e
 
-    # Rename _build_sha_to_path_map to _build_memory_caches and load tags too
     def _build_memory_caches(self):
         self._sha_to_path_map_cache = defaultdict(list)
         self._sha_to_tags_cache = {}
+        self._sha_to_dup_count_cache: dict[str, int] = {}
+        self._filepath_to_sha_cache: dict[str, str] = {}
         with self._get_db_connection() as conn:
             # 1. Build Filepath Cache
             for sha, path in conn.execute("SELECT sha256, filepath FROM filepaths").fetchall():
@@ -732,6 +775,19 @@ class ImageDatabase:
             # 2. Build Tag Cache
             for sha, tags in conn.execute("SELECT sha256, GROUP_CONCAT(tag_name) FROM tags GROUP BY sha256").fetchall():
                 self._sha_to_tags_cache[sha] = tags
+
+            # 3. Dup count: how many distinct filepaths share this SHA
+            self._sha_to_dup_count_cache = {
+                sha: len(paths)
+                for sha, paths in self._sha_to_path_map_cache.items()
+            }
+
+            # 4. Reverse map: filepath -> sha (needed by the duplicate manager dialog)
+            self._filepath_to_sha_cache = {
+                path: sha
+                for sha, paths in self._sha_to_path_map_cache.items()
+                for path in paths
+            }
 
     def _perform_search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[float, str, str]]:
         # --- OPTIMIZATION: Efficient Numpy Search ---
@@ -785,7 +841,8 @@ class ImageDatabase:
         for sha, paths in self._sha_to_path_map_cache.items():
             if paths and sha != INVALID_FILE_SENTINEL:
                 tags = self._sha_to_tags_cache.get(sha, "")
-                results.append((paths[0], tags))
+                dup_count = self._sha_to_dup_count_cache.get(sha, 1)
+                results.append((paths[0], tags, dup_count))
         return results
 
     def get_all_filepaths_with_mtime(self):
@@ -802,8 +859,36 @@ class ImageDatabase:
         results = []
         for filepath, sha, mtime in rows:
             tags = self._sha_to_tags_cache.get(sha, "")
-            results.append((filepath, mtime, tags))
+            dup_count = self._sha_to_dup_count_cache.get(sha, 1)
+            results.append((filepath, mtime, tags, dup_count))
         return results
+
+    def get_duplicate_paths(self, filepath: str) -> list[dict]:
+        """Return all filepaths that share the same SHA as the given filepath.
+
+        Returns a list of dicts with keys: filepath, size, mtime.
+        Returns an empty list if the filepath is unknown or has no duplicates.
+        """
+        if self._sha_to_path_map_cache is None:
+            self._build_memory_caches()
+
+        sha = self._filepath_to_sha_cache.get(filepath)
+        if not sha:
+            return []
+
+        paths = self._sha_to_path_map_cache.get(sha, [])
+        result = []
+        for p in paths:
+            try:
+                st = Path(p).stat()
+                result.append({
+                    "filepath": p,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+            except OSError:
+                result.append({"filepath": p, "size": 0, "mtime": 0.0})
+        return result
 
     def _get_sha256_for_filepaths(self, filepath_list: list[str]) -> list[str]:
         """Convert filepaths to their corresponding SHA256 hashes."""
@@ -890,6 +975,8 @@ class ImageDatabase:
         # Invalidate caches so deleted files disappear from subsequent searches/sorts
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None
+        self._sha_to_dup_count_cache = {}
+        self._filepath_to_sha_cache = {}
 
     def get_all_embeddings_with_shas(self):
         with self._get_db_connection() as conn:
@@ -916,5 +1003,7 @@ class ImageDatabase:
         self._shas_in_order = []
         self._sha_to_path_map_cache = None
         self._sha_to_tags_cache = None  # Clear tag cache
+        self._sha_to_dup_count_cache = {}
+        self._filepath_to_sha_cache = {}
         self._cancel_flag.set()
         logger.info("ImageDatabase closed.")

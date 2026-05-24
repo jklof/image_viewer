@@ -28,6 +28,7 @@ class BackendSignals(QObject):
     visualization_data_ready = Signal(list)
     tag_operation_failed = Signal(list, int)
     deletion_completed = Signal()
+    duplicate_paths_ready = Signal(list)  # list of dicts from get_duplicate_paths
 
 
 class BackendWorker:
@@ -166,7 +167,13 @@ class BackendWorker:
                 results = self.db._perform_search(final_query_vector, -1)
                 if tagged_only:
                     results = [(s, f, t) for s, f, t in results if "marked" in t.split(",")]
-                self.signals.results_ready.emit(results)
+                # Add dup_count to composite search results
+                results_with_dup = []
+                for score, path, tags in results:
+                    sha = self.db._filepath_to_sha_cache.get(path, "")
+                    dup_count = self.db._sha_to_dup_count_cache.get(sha, 1)
+                    results_with_dup.append((score, path, tags, dup_count))
+                self.signals.results_ready.emit(results_with_dup)
             else:
                 # All elements failed or resulted in zero vector
                 if successful_elements == 0 and len(query_elements) > 0:
@@ -195,8 +202,13 @@ class BackendWorker:
             filepaths_with_tags = self.db.get_all_unique_filepaths()
             random.shuffle(filepaths_with_tags)
             if tagged_only:
-                filepaths_with_tags = [(f, t) for f, t in filepaths_with_tags if "marked" in t.split(",")]
-            results = [(0.0, path, tags) for path, tags in filepaths_with_tags]
+                filepaths_with_tags = [(f, t, d) for f, t, d in filepaths_with_tags if "marked" in t.split(",")]
+            results = [
+                (0.0, path, tags, self.db._sha_to_dup_count_cache.get(
+                    self.db._filepath_to_sha_cache.get(path, ""), 1
+                ))
+                for path, tags, dup_count in filepaths_with_tags
+            ]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
@@ -210,8 +222,8 @@ class BackendWorker:
             files_with_mtime_tags = self.db.get_all_filepaths_with_mtime()
             files_with_mtime_tags.sort(key=lambda x: x[1], reverse=True)
             if tagged_only:
-                files_with_mtime_tags = [(f, m, t) for f, m, t in files_with_mtime_tags if "marked" in t.split(",")]
-            results = [(0.0, path, tags) for path, mtime, tags in files_with_mtime_tags]
+                files_with_mtime_tags = [(f, m, t, d) for f, m, t, d in files_with_mtime_tags if "marked" in t.split(",")]
+            results = [(0.0, path, tags, dup_count) for path, mtime, tags, dup_count in files_with_mtime_tags]
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
@@ -285,6 +297,16 @@ class BackendWorker:
                 self.db.delete_target_filepaths(filepath_list)
                 logger.info(f"Deleted {len(filepath_list)} filepaths from database.")
                 self.signals.deletion_completed.emit()
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def handle_get_duplicate_paths(self, payload: dict):
+        try:
+            if not self.db:
+                return
+            filepath = payload.get("filepath", "")
+            paths = self.db.get_duplicate_paths(filepath)
+            self.signals.duplicate_paths_ready.emit(paths)
         except Exception:
             logger.error(traceback.format_exc())
 
