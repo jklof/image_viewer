@@ -508,7 +508,9 @@ class MainWindow(QMainWindow):
         if not (0 <= self.current_single_view_index < total_count):
             return
 
-        current_filepath = self.results_model.results_data[self.current_single_view_index][1]
+        row_data = self.results_model.results_data[self.current_single_view_index]
+        current_filepath = row_data[1]
+        dup_count = row_data[3] if len(row_data) > 3 else 1
 
         prev_filepath = None
         if self.current_single_view_index > 0:
@@ -518,7 +520,12 @@ class MainWindow(QMainWindow):
         if self.current_single_view_index < total_count - 1:
             next_filepath = self.results_model.results_data[self.current_single_view_index + 1][1]
 
-        self.single_image_view_widget.set_media_data(current_filepath, prev_filepath, next_filepath)
+        self.single_image_view_widget.set_media_data(
+            current_filepath,
+            prev_filepath,
+            next_filepath,
+            dup_count=dup_count,
+        )
 
         status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
         self.update_status_bar(status)

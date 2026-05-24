@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QL
 
 import icons
 from ui_thumbnails import NavThumbnail
+from metadata_utils import get_image_metadata, ImageMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,8 @@ class OpenCVVideoPlayer(QWidget):
         self.is_playing = False
         self.current_frame = None  # Store current frame for extraction
         self._cached_image_pixmap = QPixmap()
+        self._dup_count: int = 1
+        self._metadata: ImageMetadata | None = None
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 0, 10, 0)
@@ -267,6 +270,40 @@ class OpenCVVideoPlayer(QWidget):
         self._tag_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._tag_overlay.setVisible(False)
         self._tag_overlay.raise_()
+
+        # Info panel overlay — shows metadata
+        self._info_panel = QWidget(self.video_label)
+        self._info_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._info_panel.setVisible(False)
+
+        info_panel_layout = QVBoxLayout(self._info_panel)
+        info_panel_layout.setContentsMargins(12, 8, 12, 8)
+        info_panel_layout.setSpacing(4)
+
+        self._info_label = QLabel()
+        self._info_label.setWordWrap(True)
+        self._info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._info_label.setStyleSheet(
+            "color: #f0f0f0; font-size: 12px; background: transparent;"
+        )
+        info_panel_layout.addWidget(self._info_label)
+
+        self._info_panel.setStyleSheet(
+            "background-color: rgba(10, 10, 10, 175); border-radius: 8px;"
+        )
+
+        # Duplicate count overlay
+        self._dup_overlay = QLabel(self.video_label)
+        self._dup_overlay.setStyleSheet(
+            "background-color: rgba(50, 130, 220, 210);"
+            "color: white;"
+            "border-radius: 10px;"
+            "font-size: 11px;"
+            "font-weight: bold;"
+            "padding: 2px 7px;"
+        )
+        self._dup_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._dup_overlay.setVisible(False)
 
         center_layout.addWidget(self.video_label, 1)
 
@@ -329,10 +366,9 @@ class OpenCVVideoPlayer(QWidget):
     def set_tag_state(self, is_tagged: bool):
         """Show or hide the tag badge overlay."""
         self._tag_overlay.setVisible(is_tagged)
-        # Position in top-right corner of the video_label
-        self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)
+        self._reposition_overlays()
 
-    def set_media_data(self, current_path: str, prev_path: str | None, next_path: str | None):
+    def set_media_data(self, current_path: str, prev_path: str | None, next_path: str | None, *, dup_count: int = 1):
         self.current_filepath = current_path
         self.prev_btn.set_filepath(prev_path)
         self.next_btn.set_filepath(next_path)
@@ -343,7 +379,13 @@ class OpenCVVideoPlayer(QWidget):
         if not current_path:
             self.video_label.setPixmap(QPixmap())
             self.video_controls.hide()
+            self._info_panel.setVisible(False)
             return
+
+        self._dup_count = dup_count
+        self.set_dup_state(dup_count)
+        self._metadata = get_image_metadata(current_path)
+        self._update_info_panel()
 
         if current_path.lower().endswith(".mp4"):
             self.video_controls.show()
@@ -498,6 +540,70 @@ class OpenCVVideoPlayer(QWidget):
         # current_frame is always QImage
         return QPixmap.fromImage(self.current_frame)
 
+    def set_dup_state(self, dup_count: int):
+        self._dup_count = dup_count
+        if dup_count > 1:
+            self._dup_overlay.setText(f"×{dup_count} copies")
+            self._dup_overlay.adjustSize()
+            self._dup_overlay.setVisible(True)
+        else:
+            self._dup_overlay.setVisible(False)
+        self._reposition_overlays()
+
+    def _build_info_text(self, metadata: ImageMetadata) -> str:
+        lines = []
+        lines.append(f"<b>{metadata.filename}</b>")
+        if metadata.width and metadata.height:
+            lines.append(f"{metadata.width} × {metadata.height} px")
+        if metadata.has_comfy_workflow:
+            lines.append("<span style='color:#7ec8e3;'>⚡ ComfyUI Workflow</span>")
+            if metadata.comfy_model:
+                lines.append(f"Model: {metadata.comfy_model}")
+            if metadata.comfy_sampler:
+                parts = [metadata.comfy_sampler]
+                if metadata.comfy_steps:
+                    parts.append(f"{metadata.comfy_steps} steps")
+                if metadata.comfy_cfg:
+                    parts.append(f"CFG {metadata.comfy_cfg:.1f}")
+                if metadata.comfy_scheduler:
+                    parts.append(metadata.comfy_scheduler)
+                lines.append(f"Sampler: {', '.join(parts)}")
+            if metadata.comfy_positive_prompt:
+                truncated = metadata.comfy_positive_prompt[:200]
+                if len(metadata.comfy_positive_prompt) > 200:
+                    truncated += "…"
+                lines.append(f"Prompt: <i>{truncated}</i>")
+        return "<br>".join(lines)
+
+    def _update_info_panel(self):
+        if self._metadata is None:
+            self._info_panel.setVisible(False)
+            return
+        html = self._build_info_text(self._metadata)
+        self._info_label.setText(html)
+        self._reposition_overlays()
+        self._info_panel.setVisible(True)
+
+    def _reposition_overlays(self):
+        margin = 8
+        # Tag overlay: top-right
+        self._tag_overlay.move(
+            self.video_label.width() - self._tag_overlay.width() - margin,
+            margin
+        )
+        # Dup overlay: top-left
+        if self._dup_overlay.isVisible():
+            self._dup_overlay.move(margin, margin)
+        # Info panel: bottom, full width minus margins, auto height
+        panel_width = self.video_label.width() - (margin * 2)
+        self._info_label.setFixedWidth(panel_width - 24)  # account for panel margins
+        self._info_panel.adjustSize()
+        self._info_panel.setFixedWidth(panel_width)
+        self._info_panel.move(
+            margin,
+            self.video_label.height() - self._info_panel.height() - margin
+        )
+
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
         if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
@@ -507,8 +613,7 @@ class OpenCVVideoPlayer(QWidget):
             pixmap = QPixmap.fromImage(self.current_frame)
             self._display_pixmap(pixmap, is_video=True)
 
-        if self._tag_overlay.isVisible():
-            self._tag_overlay.move(self.video_label.width() - self._tag_overlay.width() - 8, 8)
+        self._reposition_overlays()
 
         target_height = int(self.height() * 0.25)
         target_height = max(80, min(300, target_height))
