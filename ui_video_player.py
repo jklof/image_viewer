@@ -1,12 +1,12 @@
 import logging
 from pathlib import Path
-import threading
-import cv2
-from uuid import uuid4
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QThread, QRect, QSize
+import cv2
+
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QRect, QSize
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QResizeEvent, QKeyEvent, QWheelEvent, QDrag
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 
 import icons
 from ui_thumbnails import NavThumbnail
@@ -69,7 +69,7 @@ class CroppableLabel(QLabel):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            event.ignore()  # Bubble up to OpenCVVideoPlayer
+            event.ignore()  # Bubble up to SingleMediaViewer
         else:
             super().mouseDoubleClickEvent(event)
 
@@ -82,155 +82,60 @@ class CroppableLabel(QLabel):
         self._shift_pressed = False
 
 
-class VideoWorkerThread(QThread):
-    frame_ready = Signal(QImage, int)  # QImage, frame index
-    video_loaded = Signal(float, int)  # fps, total_frames
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.filepath = None
-        self.cap = None
-        self.current_filepath = None
-        self._is_playing = False
-        self._seek_target = -1
-        self._stop_requested = False
-        self._step_direction = 0
-        self.lock = threading.Lock()
-        self.condition = threading.Condition(self.lock)
-
-    def load_video(self, filepath):
-        with self.lock:
-            self.filepath = filepath
-            self._is_playing = False
-            self._seek_target = 0
-            self._step_direction = 0
-            self.condition.notify_all()
-
-    def play(self):
-        with self.lock:
-            self._is_playing = True
-            self.condition.notify_all()
-
-    def pause(self):
-        with self.lock:
-            self._is_playing = False
-
-    def seek(self, frame_idx):
-        with self.lock:
-            self._seek_target = frame_idx
-            self.condition.notify_all()
-
-    def step(self, direction):
-        with self.lock:
-            self._step_direction = direction
-            self._is_playing = False
-            self.condition.notify_all()
-
-    def stop(self):
-        with self.lock:
-            self._stop_requested = True
-            self.condition.notify_all()
-
-    def run(self):
-        while True:
-            with self.lock:
-                if self._stop_requested:
-                    break
-
-                if not self.filepath:
-                    self.condition.wait()
-                    continue
-
-                # Setup new video if filepath changed
-                if self.cap is None or self.current_filepath != self.filepath:
-                    if self.cap:
-                        self.cap.release()
-                    self.current_filepath = self.filepath
-                    self.cap = cv2.VideoCapture(self.filepath)
-                    if self.cap.isOpened():
-                        fps = self.cap.get(cv2.CAP_PROP_FPS)
-                        total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        self.video_loaded.emit(fps if fps > 0 else 30.0, total)
-                    else:
-                        self.filepath = None
-                        continue
-
-            with self.lock:
-                if self._stop_requested:
-                    break
-
-                is_playing = self._is_playing
-                seek_target = self._seek_target
-                step_direction = self._step_direction
-
-                if not is_playing and seek_target == -1 and step_direction == 0:
-                    self.condition.wait()
-                    continue
-
-            # Handle seeking
-            if seek_target != -1:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, seek_target)
-                with self.lock:
-                    self._seek_target = -1
-
-            # Handle stepping backward (requires seek)
-            if step_direction == -1:
-                current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, current_pos - 2))
-                with self.lock:
-                    self._step_direction = 0
-            elif step_direction == 1:
-                with self.lock:
-                    self._step_direction = 0
-
-            ret, frame = self.cap.read()
-            if ret:
-                current_idx = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_frame.shape
-                bytes_per_line = ch * w
-                q_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-
-                self.frame_ready.emit(q_image, current_idx)
-            else:
-                # Loop video
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                QThread.msleep(16)  # Prevent busy loop at EOF
-
-            # Sleep to match FPS if playing
-            if is_playing and ret:
-                fps = self.cap.get(cv2.CAP_PROP_FPS)
-                delay = int(1000.0 / (fps if fps > 0 else 30.0))
-                QThread.msleep(delay)
-
-        if self.cap:
-            self.cap.release()
-
-
-class OpenCVVideoPlayer(QWidget):
+class SingleMediaViewer(QWidget):
     """
-    Video player using OpenCV for reliable cross-platform playback.
-    Uses QTimer to drive frame updates.
+    Single-view media inspector.
+
+    Video playback (with sound) is driven by QtMultimedia (QMediaPlayer +
+    QAudioOutput + QVideoSink), which owns the single A/V clock during
+    playback. QMediaPlayer has no frame-step API, so exact single-frame
+    stepping while paused is served by a small on-demand OpenCV grabber
+    (one seek + one decode per discrete user action, no background thread).
     """
 
     closed = Signal()
     next_requested = Signal()
     prev_requested = Signal()
 
+    # Approximate nudge used only when the OpenCV grabber is unavailable.
+    _FALLBACK_STEP_MS = 33
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.current_filepath = None
-        self.video_fps = 30.0
-        self.total_frames = 0
-        self.current_frame_idx = 0
-        self.is_playing = False
-        self.current_frame = None  # Store current frame for extraction
+        self.current_frame = None  # Store current QImage for crops/frame saves
         self._cached_image_pixmap = QPixmap()
         self._dup_count: int = 1
         self._metadata: ImageMetadata | None = None
+        self._is_video = False
 
+        # --- QtMultimedia pipeline (audio + video, single clock) ---
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(1.0)
+
+        self.video_sink = QVideoSink(self)
+        self.player.setVideoSink(self.video_sink)
+        self.player.setLoops(QMediaPlayer.Loops.Infinite)
+
+        self.video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
+        self.player.positionChanged.connect(self._on_player_position_changed)
+        self.player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.player.errorOccurred.connect(self._on_player_error)
+
+        # --- On-demand OpenCV step grabber (paused stepping only) ---
+        self._step_cap: cv2.VideoCapture | None = None
+        self._step_fps: float = 30.0
+        self._step_total: int = 0
+        # Exact frame index of current_frame when known (paused + grabbed).
+        # None while playing or when position is only known approximately.
+        self._step_idx: int | None = None
+
+        self._init_ui()
+
+    def _init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 0, 10, 0)
         main_layout.setSpacing(10)
@@ -247,7 +152,7 @@ class OpenCVVideoPlayer(QWidget):
         # Center Container
         center_layout = QVBoxLayout()
 
-# --- Video/Image Display ---
+        # --- Video/Image Display ---
         self.video_label = CroppableLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -321,17 +226,31 @@ class OpenCVVideoPlayer(QWidget):
         self.step_back_btn.setIcon(icons.create_icon(icons.SVG_STEP_BACK))
         self.step_back_btn.setFixedWidth(40)
         self.step_back_btn.clicked.connect(lambda: self._step_frame(-1))
-        self.step_back_btn.setToolTip("Step Backward 1 Frame")
+        self.step_back_btn.setToolTip("Step Backward 1 Frame (exact, pauses)")
 
         self.step_fwd_btn = QPushButton()
         self.step_fwd_btn.setIcon(icons.create_icon(icons.SVG_STEP_FWD))
         self.step_fwd_btn.setFixedWidth(40)
         self.step_fwd_btn.clicked.connect(lambda: self._step_frame(1))
-        self.step_fwd_btn.setToolTip("Step Forward 1 Frame")
+        self.step_fwd_btn.setToolTip("Step Forward 1 Frame (exact, pauses)")
 
         self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
         self.timeline_slider.sliderMoved.connect(self._on_slider_moved)
+        self.timeline_slider.sliderReleased.connect(self._on_slider_released)
         self.timeline_slider.setRange(0, 1000)
+
+        self.volume_btn = QPushButton()
+        self.volume_btn.setIcon(icons.create_icon(icons.SVG_VOLUME_UP))
+        self.volume_btn.setFixedWidth(40)
+        self.volume_btn.setToolTip("Mute / Unmute")
+        self.volume_btn.clicked.connect(self._toggle_mute)
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setFixedWidth(80)
+        self.volume_slider.setToolTip("Volume")
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
 
         self.extract_btn = QPushButton("Save Frame")
         self.extract_btn.setIcon(icons.create_icon(icons.SVG_SAVE))
@@ -341,6 +260,8 @@ class OpenCVVideoPlayer(QWidget):
         controls_layout.addWidget(self.step_back_btn)
         controls_layout.addWidget(self.step_fwd_btn)
         controls_layout.addWidget(self.timeline_slider)
+        controls_layout.addWidget(self.volume_btn)
+        controls_layout.addWidget(self.volume_slider)
         controls_layout.addWidget(self.extract_btn)
 
         center_layout.addWidget(self.video_controls)
@@ -357,12 +278,6 @@ class OpenCVVideoPlayer(QWidget):
         next_container_layout.addStretch(1)
         main_layout.addLayout(next_container_layout)
 
-        # Setup Video Worker Thread
-        self.video_worker = VideoWorkerThread()
-        self.video_worker.frame_ready.connect(self._on_frame_ready)
-        self.video_worker.video_loaded.connect(self._on_video_loaded)
-        self.video_worker.start()
-
     def set_tag_state(self, is_tagged: bool):
         """Show or hide the tag badge overlay."""
         self._tag_overlay.setVisible(is_tagged)
@@ -375,6 +290,7 @@ class OpenCVVideoPlayer(QWidget):
 
         # Stop playback before loading new media
         self._stop_playback()
+        self._close_step_grabber()
 
         if not current_path:
             self.video_label.setPixmap(QPixmap())
@@ -382,15 +298,18 @@ class OpenCVVideoPlayer(QWidget):
             self._info_panel.setVisible(False)
             return
 
+        self._is_video = current_path.lower().endswith(".mp4")
         self._dup_count = dup_count
         self.set_dup_state(dup_count)
         self._metadata = get_image_metadata(current_path)
         self._update_info_panel()
 
-        if current_path.lower().endswith(".mp4"):
+        if self._is_video:
             self.video_controls.show()
             self._cached_image_pixmap = QPixmap()
-            self._load_video(current_path)
+            self._open_step_grabber(current_path)
+            self.player.setSource(QUrl.fromLocalFile(current_path))
+            self._start_playback()
         else:
             self.video_controls.hide()
             pixmap = QPixmap(current_path)
@@ -401,56 +320,190 @@ class OpenCVVideoPlayer(QWidget):
                 self.video_label.setText("Could not load image.")
             self.video_label.clear_selection()  # Clear selection when loading new image
 
-    def _load_video(self, filepath: str):
-        self.video_worker.load_video(filepath)
-
-    @Slot(float, int)
-    def _on_video_loaded(self, fps: float, total_frames: int):
-        self.video_fps = fps
-        self.total_frames = total_frames
-        self.current_frame_idx = 0
-        self.is_playing = True
-        self.video_worker.play()
-        self.play_btn.setIcon(icons.create_icon(icons.SVG_PAUSE))
+    # --- Playback (QtMultimedia owns the A/V clock) ---
 
     def _start_playback(self):
-        self.is_playing = True
-        self.video_worker.play()
-        self.play_btn.setIcon(icons.create_icon(icons.SVG_PAUSE))
+        self._step_idx = None  # position is player-driven from here
+        self.player.play()
 
     def _stop_playback(self):
-        self.is_playing = False
-        self.video_worker.pause()
+        self.player.pause()
         self.play_btn.setIcon(icons.create_icon(icons.SVG_PLAY))
 
     def _toggle_play_pause(self):
-        if self.is_playing:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._stop_playback()
         else:
             self._start_playback()
 
-    @Slot(QImage, int)
-    def _on_frame_ready(self, q_image: QImage, frame_idx: int):
+    @Slot(QVideoFrame)
+    def _on_video_frame_changed(self, frame: QVideoFrame):
+        if not frame.isValid():
+            return
+        if (
+            self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+            and self._step_idx is not None
+        ):
+            # An exact OpenCV grab is on screen (paused stepping); ignore the
+            # async frame produced by the trailing setPosition() so it cannot
+            # overwrite the source-resolution image with a playback-res one.
+            return
+        q_image = frame.toImage()
+        if q_image.isNull():
+            return
         self.current_frame = q_image.copy()
-        self.current_frame_idx = frame_idx
         pixmap = QPixmap.fromImage(q_image)
         self._display_pixmap(pixmap, is_video=True)
-        self._update_slider()
 
-    def _update_slider(self):
-        if self.total_frames > 0:
-            progress = int((self.current_frame_idx / self.total_frames) * 1000)
+    @Slot(int)
+    def _on_player_position_changed(self, pos_ms: int):
+        duration = self.player.duration()
+        if duration > 0:
+            progress = int((pos_ms / duration) * 1000)
             self.timeline_slider.blockSignals(True)
             self.timeline_slider.setValue(progress)
             self.timeline_slider.blockSignals(False)
 
+    @Slot(QMediaPlayer.PlaybackState)
+    def _on_playback_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_btn.setIcon(icons.create_icon(icons.SVG_PAUSE))
+        else:
+            self.play_btn.setIcon(icons.create_icon(icons.SVG_PLAY))
+
+    @Slot(QMediaPlayer.Error, str)
+    def _on_player_error(self, error: QMediaPlayer.Error, error_string: str):
+        if error == QMediaPlayer.Error.NoError:
+            return
+        logger.error(f"Video playback failed for {self.current_filepath}: {error_string}")
+        self._stop_playback()
+        self.video_label.setText(f"Could not play video.\n{error_string or 'Missing codec?'}")
+
     def _on_slider_moved(self, value: int):
-        target_frame = int((value / 1000.0) * self.total_frames)
-        self.video_worker.seek(target_frame)
+        # While playing, scrub approximately via the player clock.
+        # While paused, wait for release so we can grab the exact frame once.
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            duration = self.player.duration()
+            if duration > 0:
+                self.player.setPosition(int((value / 1000.0) * duration))
+
+    def _on_slider_released(self):
+        if not self._is_video:
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return
+        # Paused: resolve the slider position to the exact nearest frame.
+        value = self.timeline_slider.value()
+        if self._step_cap is not None and self._step_total > 0:
+            target_idx = max(0, min(self._step_total - 1, int(round((value / 1000.0) * self._step_total))))
+            self._grab_exact_frame(target_idx)
+        else:
+            duration = self.player.duration()
+            if duration > 0:
+                self.player.setPosition(int((value / 1000.0) * duration))
+
+    # --- Exact paused stepping (OpenCV on-demand grabber) ---
+
+    def _open_step_grabber(self, filepath: str):
+        """Open a dedicated OpenCV capture used only for paused stepping."""
+        self._close_step_grabber()
+        try:
+            cap = cv2.VideoCapture(filepath)
+            if not cap.isOpened():
+                cap.release()
+                logger.warning(f"Step grabber could not open {filepath}; stepping will be approximate.")
+                return
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self._step_cap = cap
+            self._step_fps = fps if fps and fps > 0 else 30.0
+            self._step_total = total if total and total > 0 else 0
+            self._step_idx = None
+        except Exception as e:
+            logger.warning(f"Step grabber failed for {filepath}: {e}; stepping will be approximate.")
+            self._step_cap = None
+
+    def _close_step_grabber(self):
+        if self._step_cap is not None:
+            try:
+                self._step_cap.release()
+            except Exception:
+                pass
+            self._step_cap = None
+        self._step_total = 0
+        self._step_idx = None
 
     def _step_frame(self, direction: int):
-        self._stop_playback()
-        self.video_worker.step(direction)
+        """Step exactly one frame forward (+1) or backward (-1), pausing first."""
+        if not self._is_video:
+            return
+        self.player.pause()
+
+        if self._step_cap is None or self._step_total <= 0:
+            self._fallback_nudge(direction)
+            return
+
+        if self._step_idx is None:
+            # Derive the base index from the player clock, then step exactly.
+            base = int(round((self.player.position() / 1000.0) * self._step_fps))
+        else:
+            base = self._step_idx
+        target_idx = max(0, min(self._step_total - 1, base + direction))
+        if not self._grab_exact_frame(target_idx):
+            self._fallback_nudge(direction)
+
+    def _grab_exact_frame(self, idx: int) -> bool:
+        """Seek the step grabber to idx and display that exact frame."""
+        if self._step_cap is None:
+            return False
+        try:
+            self._step_cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = self._step_cap.read()
+            if not ret:
+                return False
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_frame.shape
+            q_image = QImage(rgb_frame.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+            self.current_frame = q_image
+            self._step_idx = idx
+            self._display_pixmap(QPixmap.fromImage(q_image), is_video=True)
+            self._update_slider_from_index(idx)
+            # Keep the player clock on the stepped frame so resume is seamless.
+            if self._step_fps > 0:
+                self.player.setPosition(int((idx / self._step_fps) * 1000))
+            return True
+        except Exception as e:
+            logger.warning(f"Exact frame grab failed at index {idx}: {e}")
+            return False
+
+    def _fallback_nudge(self, direction: int):
+        """Approximate step used only when the OpenCV grabber is unavailable."""
+        self._step_idx = None
+        new_pos = self.player.position() + direction * self._FALLBACK_STEP_MS
+        self.player.setPosition(max(0, min(self.player.duration(), new_pos)))
+
+    def _update_slider_from_index(self, idx: int):
+        if self._step_total > 0:
+            progress = int((idx / self._step_total) * 1000)
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(progress)
+            self.timeline_slider.blockSignals(False)
+
+    # --- Volume ---
+
+    def _on_volume_changed(self, value: int):
+        self.audio_output.setVolume(value / 100.0)
+        if value == 0:
+            self.volume_btn.setIcon(icons.create_icon(icons.SVG_VOLUME_OFF))
+        else:
+            self.volume_btn.setIcon(icons.create_icon(icons.SVG_VOLUME_UP))
+
+    def _toggle_mute(self):
+        is_muted = self.audio_output.isMuted()
+        self.audio_output.setMuted(not is_muted)
+        self.volume_btn.setIcon(
+            icons.create_icon(icons.SVG_VOLUME_UP if is_muted else icons.SVG_VOLUME_OFF)
+        )
 
     def _display_pixmap(self, pixmap: QPixmap, is_video: bool = False):
         """Scale and display a pixmap."""
@@ -463,7 +516,6 @@ class OpenCVVideoPlayer(QWidget):
         scaled = pixmap.scaled(self.video_label.size(), Qt.AspectRatioMode.KeepAspectRatio, transform_mode)
         self.video_label.setPixmap(scaled)
 
-
     def get_cropped_image(self) -> QImage | None:
         """Get the currently selected crop area as a QImage.
 
@@ -474,19 +526,20 @@ class OpenCVVideoPlayer(QWidget):
             return None
 
         # Get the original full-res image
-        if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
+        if self.current_filepath and not self._is_video:
             orig_img = QImage(self.current_filepath)
             if orig_img.isNull():
                 return None
         else:
-            # For video, use the current frame (already QImage)
+            # For video, use the current frame (exact source frame when stepped,
+            # playback-resolution frame while playing)
             if self.current_frame is None:
                 return None
             orig_img = self.current_frame
 
         # Get the displayed scaled pixmap
         scaled_pixmap = self.video_label.pixmap()
-        if scaled_pixmap.isNull():
+        if scaled_pixmap is None or scaled_pixmap.isNull():
             return None
 
         # Calculate letterbox offset
@@ -517,7 +570,10 @@ class OpenCVVideoPlayer(QWidget):
             return
 
         video_name = Path(self.current_filepath).stem
-        default_path = f"{video_name}_frame_{self.current_frame_idx}.png"
+        if self._step_idx is not None:
+            default_path = f"{video_name}_frame_{self._step_idx}.png"
+        else:
+            default_path = f"{video_name}_frame_{self.player.position()}ms.png"
 
         filepath, _ = QFileDialog.getSaveFileName(self, "Save Frame As PNG", default_path, "PNG Images (*.png)")
 
@@ -606,7 +662,7 @@ class OpenCVVideoPlayer(QWidget):
 
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
-        if self.current_filepath and not self.current_filepath.lower().endswith(".mp4"):
+        if self.current_filepath and not self._is_video:
             if not self._cached_image_pixmap.isNull():
                 self._display_pixmap(self._cached_image_pixmap, is_video=False)
         elif self.current_frame is not None:
@@ -626,17 +682,17 @@ class OpenCVVideoPlayer(QWidget):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         if key == Qt.Key.Key_Left:
-            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+            if self._is_video:
                 self._step_frame(-1)
             else:
                 self.prev_requested.emit()
         elif key == Qt.Key.Key_Right:
-            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+            if self._is_video:
                 self._step_frame(1)
             else:
                 self.next_requested.emit()
         elif key == Qt.Key.Key_Space:
-            if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+            if self._is_video:
                 self._toggle_play_pause()
         elif key == Qt.Key.Key_Escape:
             self.closed.emit()
@@ -644,7 +700,7 @@ class OpenCVVideoPlayer(QWidget):
             super().keyPressEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
-        if self.current_filepath and self.current_filepath.lower().endswith(".mp4"):
+        if self._is_video:
             if event.angleDelta().y() > 0:
                 self._step_frame(-1)
             else:
@@ -679,15 +735,13 @@ class OpenCVVideoPlayer(QWidget):
 
     def stop_media(self):
         """Stop video playback when navigating away."""
-        self._stop_playback()
+        self.player.stop()
+        self._close_step_grabber()
 
     def cleanup(self):
         """Clean up resources."""
         self.stop_media()
-        if self.video_worker.isRunning():
-            self.video_worker.stop()
-            self.video_worker.wait()
 
 
 # Alias for backward compatibility
-SingleMediaViewer = OpenCVVideoPlayer
+OpenCVVideoPlayer = SingleMediaViewer

@@ -67,3 +67,12 @@ python image_cli.py sync
 python main.py
 ```
 
+> **Video sound on Linux:** video playback with audio uses QtMultimedia
+> (FFmpeg backend). The conda env provides `qt6-multimedia`; on some
+> distributions you may also need system media libraries, e.g. on
+> Debian/Ubuntu:
+> ```bash
+> sudo apt install ffmpeg libavcodec-extra gstreamer1.0-libav gstreamer1.0-plugins-good
+> ```
+> Windows and macOS use native OS decoders and need no extra setup.
+

@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import argparse
 import multiprocessing
@@ -20,6 +21,12 @@ def main():
 
     # Note: multiprocessing start method is set inside __main__ block below
     # to avoid RuntimeError when this module is imported by other scripts.
+
+    # Prefer the FFmpeg multimedia backend on Linux for broad codec support.
+    # Must be set before QApplication loads the QtMultimedia plugins.
+    # Respects an explicit user override via the environment.
+    if "QT_MEDIA_BACKEND" not in os.environ:
+        os.environ["QT_MEDIA_BACKEND"] = "ffmpeg"
 
     app = QApplication(sys.argv)
     try:

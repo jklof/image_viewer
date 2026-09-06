@@ -10,7 +10,9 @@ dependencies:
   - python=3.11
   - pip
   - pyside6
+  - qt6-multimedia # QMediaPlayer/QAudioOutput video playback with sound
   - pyqtgraph
+  - qt6-multimedia
   - pytorch
   - transformers
   - pyyaml
