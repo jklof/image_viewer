@@ -38,7 +38,11 @@ def get_image_metadata(filepath: str) -> ImageMetadata:
             metadata.width, metadata.height = img.size
 
             # ComfyUI stores the executable API graph JSON in the "prompt" key.
+            # PNG: tEXt chunk -> img.info["prompt"]. JPEG: EXIF UserComment
+            # (0x9286 in the Exif sub-IFD 0x8769). Comfy-JPEG only per scope.
             raw_json = img.info.get("prompt")
+            if not raw_json:
+                raw_json = _get_exif_user_comment(img)
             if raw_json:
                 comfy_data = _parse_comfy_workflow(str(raw_json))
                 if comfy_data:
@@ -54,6 +58,51 @@ def get_image_metadata(filepath: str) -> ImageMetadata:
         logger.exception("Failed to extract metadata from %s", filepath)
 
     return metadata
+
+
+def _get_exif_user_comment(img) -> str | None:
+    """Extract ComfyUI workflow JSON from EXIF UserComment (JPEG).
+
+    UserComment (0x9286) lives in the Exif sub-IFD (0x8769), not the root
+    IFD, so check both. Handles the 8-byte charset header (ASCII/UNICODE/
+    undefined) by slicing from the first '{' to the last '}'. Returns None
+    if no JSON-looking payload is found. Never raises.
+    """
+    try:
+        exif = img.getexif()
+    except Exception:
+        return None
+    if exif is None:
+        exif = {}
+
+    user_comment = exif.get(0x9286)
+    if user_comment is None:
+        try:
+            exif_ifd = exif.get_ifd(0x8769)
+            user_comment = exif_ifd.get(0x9286)
+        except Exception:
+            user_comment = None
+    if user_comment is None:
+        # Some writers stash it in a plain "comment" info key instead.
+        try:
+            fallback = img.info.get("comment")
+        except Exception:
+            fallback = None
+        if not fallback:
+            return None
+        user_comment = fallback
+
+    if isinstance(user_comment, bytes):
+        text = user_comment.decode("utf-8", errors="ignore")
+    elif isinstance(user_comment, str):
+        text = user_comment
+    else:
+        return None
+
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return text[start : end + 1]
 
 
 def _parse_comfy_workflow(raw_json: str) -> dict:

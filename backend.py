@@ -167,12 +167,15 @@ class BackendWorker:
                 results = self.db._perform_search(final_query_vector, -1)
                 if tagged_only:
                     results = [(s, f, t) for s, f, t in results if "marked" in t.split(",")]
-                # Add dup_count to composite search results
+                # Add dup_count + sha to composite search results.
+                # 5-tuple (score, path, tags, dup_count, sha) lets the model
+                # update all same-SHA rows optimistically (Sort-by-Date shows
+                # every filepath, not just paths[0]).
                 results_with_dup = []
                 for score, path, tags in results:
                     sha = self.db._filepath_to_sha_cache.get(path, "")
                     dup_count = self.db._sha_to_dup_count_cache.get(sha, 1)
-                    results_with_dup.append((score, path, tags, dup_count))
+                    results_with_dup.append((score, path, tags, dup_count, sha))
                 self.signals.results_ready.emit(results_with_dup)
             else:
                 # All elements failed or resulted in zero vector
@@ -202,13 +205,17 @@ class BackendWorker:
             filepaths_with_tags = self.db.get_all_unique_filepaths()
             random.shuffle(filepaths_with_tags)
             if tagged_only:
-                filepaths_with_tags = [(f, t, d) for f, t, d in filepaths_with_tags if "marked" in t.split(",")]
-            results = [
-                (0.0, path, tags, self.db._sha_to_dup_count_cache.get(
-                    self.db._filepath_to_sha_cache.get(path, ""), 1
-                ))
-                for path, tags, dup_count in filepaths_with_tags
-            ]
+                filepaths_with_tags = [t for t in filepaths_with_tags if "marked" in t[1].split(",")]
+            results = []
+            for entry in filepaths_with_tags:
+                # Backward compat: accept (path, tags, dup) or (path, tags, dup, sha)
+                if len(entry) >= 4:
+                    path, tags, _dup, sha = entry[0], entry[1], entry[2], entry[3]
+                else:
+                    path, tags = entry[0], entry[1]
+                    sha = self.db._filepath_to_sha_cache.get(path, "")
+                dup_count = self.db._sha_to_dup_count_cache.get(sha, 1)
+                results.append((0.0, path, tags, dup_count, sha))
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())
@@ -222,8 +229,16 @@ class BackendWorker:
             files_with_mtime_tags = self.db.get_all_filepaths_with_mtime()
             files_with_mtime_tags.sort(key=lambda x: x[1], reverse=True)
             if tagged_only:
-                files_with_mtime_tags = [(f, m, t, d) for f, m, t, d in files_with_mtime_tags if "marked" in t.split(",")]
-            results = [(0.0, path, tags, dup_count) for path, mtime, tags, dup_count in files_with_mtime_tags]
+                files_with_mtime_tags = [t for t in files_with_mtime_tags if "marked" in t[2].split(",")]
+            results = []
+            for entry in files_with_mtime_tags:
+                # Backward compat: (path, mtime, tags, dup) or (path, mtime, tags, dup, sha)
+                if len(entry) >= 5:
+                    path, tags, dup_count, sha = entry[0], entry[2], entry[3], entry[4]
+                else:
+                    path, tags, dup_count = entry[0], entry[2], entry[3]
+                    sha = self.db._filepath_to_sha_cache.get(path, "")
+                results.append((0.0, path, tags, dup_count, sha))
             self.signals.results_ready.emit(results)
         except Exception:
             logger.error(traceback.format_exc())

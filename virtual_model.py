@@ -21,6 +21,9 @@ class ImageResultModel(QAbstractListModel):
         self.placeholder_pixmap = create_placeholder_pixmap()
         # Map filepath to list of row indices (handles duplicate filepaths)
         self._filepath_to_row_map = collections.defaultdict(list)
+        # Map sha256 to list of row indices (handles duplicate content shown
+        # as separate rows in Sort-by-Date). Used for SHA-aware tag toggles.
+        self._sha_to_rows_map = collections.defaultdict(list)
         get_loader_manager().thumbnail_loaded.connect(self.on_thumbnail_ready)
 
     def rowCount(self, parent=QModelIndex()):
@@ -43,7 +46,7 @@ class ImageResultModel(QAbstractListModel):
             return "marked" in tags
 
         if role == DUP_COUNT_ROLE:
-            # result tuple is (score, filepath, tags, dup_count)
+            # result tuple is (score, filepath, tags, dup_count[, sha256])
             # guard against old 3-tuples during transition
             return self.results_data[row][3] if len(self.results_data[row]) > 3 else 1
 
@@ -96,37 +99,68 @@ class ImageResultModel(QAbstractListModel):
         self.results_data = results
         # Map filepath to list of row indices to handle duplicate filepaths
         self._filepath_to_row_map = collections.defaultdict(list)
+        self._sha_to_rows_map = collections.defaultdict(list)
         for i, item in enumerate(results):
             filepath = item[1]
             self._filepath_to_row_map[filepath].append(i)
+            if len(item) >= 5 and item[4]:
+                self._sha_to_rows_map[item[4]].append(i)
         self.endResetModel()
 
     def clear(self):
         self.beginResetModel()
         self.results_data = []
         self._filepath_to_row_map = collections.defaultdict(list)
+        self._sha_to_rows_map = collections.defaultdict(list)
         self.endResetModel()
 
     def toggle_tag_for_filepaths(self, filepaths: list[str]):
-        """Optimistically update tags for specified filepaths, regardless of current sort order."""
+        """Optimistically update tags for specified filepaths, regardless of current sort order.
+
+        SHA-aware: tags belong to content hashes, so toggling one filepath
+        updates ALL rows sharing its sha256. This keeps Sort-by-Date (which
+        shows every filepath) consistent when only one copy is selected.
+        Each affected row is toggled exactly once.
+        """
+        # Resolve target rows: expand filepaths -> SHAs -> all sibling rows.
+        target_rows: set[int] = set()
         for filepath in filepaths:
-            # Use the cache to find the current valid row(s) for this filepath
             rows = self._filepath_to_row_map.get(filepath, [])
+            if not rows:
+                continue
+            # Collect SHAs for these rows (5th tuple element, may be missing)
+            shas = set()
             for row in rows:
                 if 0 <= row < len(self.results_data):
                     item = self.results_data[row]
-                    score, fp, tags = item[0], item[1], item[2]
-                    dup_count = item[3] if len(item) > 3 else 1
+                    if len(item) >= 5 and item[4]:
+                        shas.add(item[4])
+            if shas:
+                for sha in shas:
+                    target_rows.update(self._sha_to_rows_map.get(sha, []))
+            else:
+                # No SHA info (legacy 4-tuples): fall back to filepath rows
+                target_rows.update(rows)
 
-                    # Convert to set for safer manipulation (Also fixes Issue #6)
-                    tag_set = set(tags.split(",")) if tags else set()
-                    if "marked" in tag_set:
-                        tag_set.discard("marked")
-                    else:
-                        tag_set.add("marked")
+        for row in sorted(target_rows):
+            if 0 <= row < len(self.results_data):
+                item = self.results_data[row]
+                score, fp, tags = item[0], item[1], item[2]
+                dup_count = item[3] if len(item) > 3 else 1
+                sha = item[4] if len(item) >= 5 else ""
 
-                    new_tags = ",".join(filter(None, tag_set))
+                # Convert to set for safer manipulation (Also fixes Issue #6)
+                tag_set = set(tags.split(",")) if tags else set()
+                if "marked" in tag_set:
+                    tag_set.discard("marked")
+                else:
+                    tag_set.add("marked")
 
+                new_tags = ",".join(filter(None, tag_set))
+
+                if sha:
+                    self.results_data[row] = (score, fp, new_tags, dup_count, sha)
+                else:
                     self.results_data[row] = (score, fp, new_tags, dup_count)
-                    index = self.createIndex(row, 0)
-                    self.dataChanged.emit(index, index, [TAGS_ROLE])
+                index = self.createIndex(row, 0)
+                self.dataChanged.emit(index, index, [TAGS_ROLE])

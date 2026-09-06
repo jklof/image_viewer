@@ -58,7 +58,7 @@ class SyncWorker(QObject):
                 self.embedder = ImageEmbedder(model_id=model_id, use_cpu_only=self.use_cpu_only)
                 self._owns_embedder = True
 
-            self.db = ImageDatabase(db_path=db_path, embedder=self.embedder)
+            self.db = ImageDatabase(db_path=db_path, embedder=self.embedder, load_embeddings=False)
             # Check model compatibility but don't raise here; reconcile_database will handle it
             if not self.db._verify_model_compatibility(raise_error=False):
                 logger.warning("Database model mismatch detected in SyncWorker. Reconciliation will handle the nuke.")

@@ -69,18 +69,25 @@ class WeightSlider(QSlider):
         handle_rect = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderHandle, self)
         groove_rect.setHeight(8)
         groove_rect.moveTop((self.height() - groove_rect.height()) // 2)
+        # Bi-directional fill originating at 0 (center): green extends right
+        # for positive weights, red extends left for negative weights.
+        center_x = groove_rect.center().x()
         handle_x = handle_rect.center().x()
-        green_part = groove_rect.adjusted(0, 0, 0, 0)
-        green_part.setRight(handle_x)
-        red_part = groove_rect.adjusted(0, 0, 0, 0)
-        red_part.setLeft(handle_x)
         painter.setPen(Qt.PenStyle.NoPen)
-        if green_part.width() > 0:
-            painter.setBrush(QColor("#2f9e44"))
-            painter.drawRect(green_part)
-        if red_part.width() > 0:
-            painter.setBrush(QColor("#c92a2a"))
-            painter.drawRect(red_part)
+        if handle_x > center_x:
+            bar_rect = groove_rect.adjusted(0, 0, 0, 0)
+            bar_rect.setLeft(center_x)
+            bar_rect.setRight(handle_x)
+            if bar_rect.width() > 0:
+                painter.setBrush(QColor("#2f9e44"))
+                painter.drawRect(bar_rect)
+        elif handle_x < center_x:
+            bar_rect = groove_rect.adjusted(0, 0, 0, 0)
+            bar_rect.setLeft(handle_x)
+            bar_rect.setRight(center_x)
+            if bar_rect.width() > 0:
+                painter.setBrush(QColor("#c92a2a"))
+                painter.drawRect(bar_rect)
 
 
 class QueryElementWidget(QFrame):

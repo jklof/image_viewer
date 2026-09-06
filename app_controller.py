@@ -198,7 +198,12 @@ class AppController(QObject):
         logger.info("Soft restart completed successfully.")
 
     def _connect_backend_signals(self):
-        """Reconnect backend signals after soft restart."""
+        """Reconnect backend signals after soft restart.
+
+        NOTE: window -> controller connections (dedup, tagging, etc.) live
+        ONLY in _connect_signals and must NOT be re-connected here, otherwise
+        every soft restart adds a duplicate slot (e.g. triple file deletion).
+        """
         # Connect new backend signals
         self.backend_signals.initialized.connect(self.on_backend_initialized)
         self.backend_signals.error.connect(self.on_backend_error)
@@ -210,10 +215,6 @@ class AppController(QObject):
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
         self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
         self.backend_signals.duplicate_paths_ready.connect(self.window._on_duplicate_paths_ready)
-
-        # Duplicate management
-        self.window.dedup_info_requested.connect(self.on_dedup_info_requested)
-        self.window.manage_duplicates_requested.connect(self.on_manage_duplicates_requested)
 
     @Slot()
     def on_backend_initialized(self):
@@ -626,12 +627,36 @@ class AppController(QObject):
         # Save scroll state
         scroll_val, scroll_max = self.window.get_scroll_state()
 
-        # Filter results on main thread (safe access to GUI model)
+        # Refresh B (in-place): filter deleted rows and decrement surviving
+        # ×N badges without re-querying, so the user's active search /
+        # sort / filter context is preserved.
         deleted_filepaths_set = set(deleted_filepaths)
+        current = list(self.window.results_model.results_data)
+
+        # Map deleted filepaths -> sha (from pre-delete model rows) so we
+        # know how many copies of each content hash were removed.
+        from collections import Counter
+        fp_to_sha: dict[str, str] = {}
+        for result in current:
+            if len(result) >= 5 and result[4]:
+                fp_to_sha.setdefault(result[1], result[4])
+        removed_sha_counts = Counter(
+            fp_to_sha[fp] for fp in deleted_filepaths if fp in fp_to_sha
+        )
+
         new_results = []
-        for result in self.window.results_model.results_data:
+        for result in current:
             filepath = result[1]
-            if filepath not in deleted_filepaths_set:
+            if filepath in deleted_filepaths_set:
+                continue
+            if len(result) >= 5 and removed_sha_counts:
+                score, fp, tags, dup_count, sha = (
+                    result[0], result[1], result[2], result[3], result[4],
+                )
+                if sha in removed_sha_counts:
+                    dup_count = max(1, dup_count - removed_sha_counts[sha])
+                new_results.append((score, fp, tags, dup_count, sha))
+            else:
                 new_results.append(result)
 
         self.window.results_model.set_results(new_results)
@@ -727,7 +752,10 @@ class AppController(QObject):
 
     @Slot()
     def on_backend_deletion_completed(self):
+        # Refresh B: the model was already filtered in-place in
+        # _on_delete_completed (with dup_counts decremented), so just
+        # re-enable controls. Do NOT force Sort-by-Date — that would wipe
+        # the user's active search / random / tagged-only context.
         logger.info("Backend finished DB deletion job.")
         self.window.set_controls_enabled(True)
-        # Refresh results so dup_counts update after deletion
-        self.on_sort_by_date_requested()
+        self.window.update_status_bar("Deletion complete. View updated in place.")

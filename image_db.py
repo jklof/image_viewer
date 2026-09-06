@@ -251,6 +251,15 @@ class EmbeddingConsumerThread(threading.Thread):
                 except Exception as e:
                     logger.error(f"Failed to embed batch: {e}")
 
+            # FK SAFETY: only commit thumbnails/filepaths whose SHA exists.
+            # If embed_batch failed, valid_new_shas is empty and inserting
+            # thumbnails/filepaths for unknown SHAs would violate
+            # FOREIGN KEY constraints (foreign_keys=ON) and roll back the
+            # whole batch. Filter against in-memory sets (no extra SQL).
+            ok_shas = existing_shas_in_db | valid_new_shas | {INVALID_FILE_SENTINEL}
+            if new_thumbnails_to_commit:
+                new_thumbnails_to_commit = [t for t in new_thumbnails_to_commit if t[0] in valid_new_shas]
+
             with self.conn:
                 if new_embeddings_to_commit:
                     self.conn.executemany(
@@ -267,7 +276,16 @@ class EmbeddingConsumerThread(threading.Thread):
                 # - Valid files: point to their real embedding
                 # - Invalid files: point to the sentinel row (which always exists)
                 # This ensures the DB knows about every file, preventing re-processing on next sync.
-                filepath_data = [(str(fp), sha, mt) for fp, sha, mt in zip(filepaths, shas, mtimes)]
+                # FK SAFETY: drop filepaths whose SHA failed to embed (not in ok_shas)
+                # so one bad batch doesn't roll back every filepath in the transaction.
+                filepath_data = [
+                    (str(fp), sha, mt)
+                    for fp, sha, mt in zip(filepaths, shas, mtimes)
+                    if sha in ok_shas
+                ]
+                dropped = len(batch) - len(filepath_data)
+                if dropped:
+                    logger.warning(f"Skipping {dropped} filepath(s) with missing embeddings to preserve FK integrity.")
 
                 if filepath_data:
                     self.conn.executemany(
@@ -289,10 +307,11 @@ class ImageDatabase:
     class ModelMismatchError(Exception):
         pass
 
-    def __init__(self, db_path="images.db", embedder: "ImageEmbedder" = None):
+    def __init__(self, db_path="images.db", embedder: "ImageEmbedder" = None, load_embeddings: bool = True):
         if embedder is None:
             raise TypeError("ImageEmbedder is required.")
         self.db_path, self.embedder = db_path, embedder
+        self._load_embeddings = load_embeddings
         self._create_tables()
         self._shas_in_order, self._embedding_matrix = [], None
         self._sha_to_path_map_cache = None
@@ -300,7 +319,8 @@ class ImageDatabase:
         self._sha_to_dup_count_cache: dict[str, int] = {}
         self._filepath_to_sha_cache: dict[str, str] = {}
         self._cancel_flag = threading.Event()
-        self._load_embeddings_into_memory()
+        if self._load_embeddings:
+            self._load_embeddings_into_memory()
 
     def _get_db_connection(self):
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -558,7 +578,11 @@ class ImageDatabase:
         self._cleanup_orphaned_embeddings()
         # We no longer automatically update visualization here.
         # It will be calculated Just-In-Time when the user requests it.
-        self._load_embeddings_into_memory()
+        # Skip the RAM reload for SyncWorker instances (load_embeddings=False):
+        # they call db.close() right after sync, so the load would be wasted
+        # work + duplicate the backend's embedding matrix in RAM.
+        if self._load_embeddings:
+            self._load_embeddings_into_memory()
 
     def _load_embeddings_into_memory(self):
         self._sha_to_path_map_cache = None
@@ -842,7 +866,7 @@ class ImageDatabase:
             if paths and sha != INVALID_FILE_SENTINEL:
                 tags = self._sha_to_tags_cache.get(sha, "")
                 dup_count = self._sha_to_dup_count_cache.get(sha, 1)
-                results.append((paths[0], tags, dup_count))
+                results.append((paths[0], tags, dup_count, sha))
         return results
 
     def get_all_filepaths_with_mtime(self):
@@ -860,7 +884,7 @@ class ImageDatabase:
         for filepath, sha, mtime in rows:
             tags = self._sha_to_tags_cache.get(sha, "")
             dup_count = self._sha_to_dup_count_cache.get(sha, 1)
-            results.append((filepath, mtime, tags, dup_count))
+            results.append((filepath, mtime, tags, dup_count, sha))
         return results
 
     def get_duplicate_paths(self, filepath: str) -> list[dict]:
