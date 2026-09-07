@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,9 @@ class ImageMetadata:
     comfy_cfg: float | None = None
     comfy_scheduler: str | None = None
     has_comfy_workflow: bool = False
+    # Filenames referenced by LoadImage / LoadImageMask nodes in the workflow
+    # ("show all" lineage: no role attribution, heuristically matched later).
+    source_images: list[str] = field(default_factory=list)
 
 
 def get_image_metadata(filepath: str) -> ImageMetadata:
@@ -53,6 +56,7 @@ def get_image_metadata(filepath: str) -> ImageMetadata:
                     metadata.comfy_steps = comfy_data.get("comfy_steps")
                     metadata.comfy_cfg = comfy_data.get("comfy_cfg")
                     metadata.comfy_scheduler = comfy_data.get("comfy_scheduler")
+                    metadata.source_images = list(comfy_data.get("source_images", []))
 
     except Exception:
         logger.exception("Failed to extract metadata from %s", filepath)
@@ -121,6 +125,9 @@ def _parse_comfy_workflow(raw_json: str) -> dict:
       non-empty and under 1000 characters to avoid dumping massive prompt dumps into
       the UI.
 
+    - ``"LoadImage"`` / ``"LoadImageMask"``: collect ``inputs["image"]``
+      filenames (deduped) into ``source_images`` for workflow lineage.
+
     If JSON parsing fails or any key is missing, catch the exception silently and
     return whatever was successfully extracted. ``has_comfy_workflow`` is set to
     ``True`` only if at least one ComfyUI-specific node was found.
@@ -184,6 +191,23 @@ def _parse_comfy_workflow(raw_json: str) -> dict:
             if prompt and len(prompt) < 1000:
                 result["comfy_positive_prompt"] = prompt
                 found_comfy_node = True
+
+        # Lineage ("show all"): collect every filename referenced by
+        # LoadImage / LoadImageMask nodes, deduped, order-preserving.
+        # No link tracing and no role attribution by design — matching is
+        # heuristic and happens later in ImageDatabase.resolve_source_image.
+        seen_sources: set[str] = set()
+        source_images: list[str] = []
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") in ("LoadImage", "LoadImageMask"):
+                name = node.get("inputs", {}).get("image")
+                if name and isinstance(name, str) and name not in seen_sources:
+                    seen_sources.add(name)
+                    source_images.append(name)
+        if source_images:
+            result["source_images"] = source_images
 
     except Exception:
         logger.exception("Error parsing ComfyUI workflow")

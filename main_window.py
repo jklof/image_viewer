@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
     delete_tagged_requested = Signal()
     dedup_info_requested = Signal(str)   # filepath
     manage_duplicates_requested = Signal(list)   # list[str] filepaths to delete
+    resolve_sources_requested = Signal(str, list)   # target_filepath, [source filenames]
 
     def __init__(self):
         super().__init__()
@@ -273,6 +274,8 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget.closed.connect(self._return_to_grid_view)
         self.single_image_view_widget.next_requested.connect(self._navigate_next)
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
+        self.single_image_view_widget.source_jump_requested.connect(self._on_source_jump_requested)
+        self.single_image_view_widget.source_add_query_requested.connect(self._on_source_add_query_requested)
         self.visualizer_widget.image_selected.connect(self._on_visualizer_image_selected)
         self.random_order_btn.clicked.connect(self.random_order_triggered.emit)
         self.sort_by_date_btn.clicked.connect(self.sort_by_date_triggered.emit)
@@ -527,6 +530,13 @@ class MainWindow(QMainWindow):
             dup_count=dup_count,
         )
 
+        # ComfyUI source lineage: reuse the viewer's already-extracted metadata
+        # (no second PIL decode on the GUI thread). Resolution itself runs async
+        # in BackendWorker; badges render when results come back.
+        metadata = self.single_image_view_widget.get_current_metadata()
+        if metadata is not None and metadata.source_images:
+            self.resolve_sources_requested.emit(current_filepath, list(metadata.source_images))
+
         status = f"Viewing image {self.current_single_view_index + 1} of {total_count} | {Path(current_filepath).name}"
         self.update_status_bar(status)
 
@@ -659,6 +669,34 @@ class MainWindow(QMainWindow):
         dlg = DuplicateManagerDialog(duplicate_info, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.filepaths_to_delete:
             self.manage_duplicates_requested.emit(dlg.filepaths_to_delete)
+
+    @Slot(str, list)
+    def on_source_resolution_ready(self, target_filepath: str, resolved_items: list):
+        """Render ComfyUI source badges; ignore results for a stale target."""
+        if not (0 <= self.current_single_view_index < self.results_model.rowCount()):
+            return
+        current = self.results_model.results_data[self.current_single_view_index][1]
+        if current != target_filepath:
+            return  # user navigated away while resolving; drop stale results
+        self.single_image_view_widget.set_resolved_sources(resolved_items)
+
+    @Slot(str)
+    def _on_source_jump_requested(self, filepath: str):
+        rows = self.results_model._filepath_to_row_map.get(filepath, [])
+        if rows:
+            self.current_single_view_index = rows[0]
+            self._show_current_single_image()
+        else:
+            self.update_status_bar(
+                f"Source '{Path(filepath).name}' is not in current view. Use '+' to add it to the query."
+            )
+
+    @Slot(str)
+    def _on_source_add_query_requested(self, filepath: str):
+        # UI-local staging only (same as grid context-menu "Add to query");
+        # safe at any time, including during sync.
+        self.query_builder.add_image_element(filepath)
+        self.update_status_bar(f"Added source '{Path(filepath).name}' to the query.")
 
     @Slot(QModelIndex, QModelIndex, list)
     def _on_model_data_changed(self, top_left, bottom_right, roles):

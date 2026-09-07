@@ -95,10 +95,15 @@ class AppController(QObject):
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
         self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
         self.backend_signals.duplicate_paths_ready.connect(self.window._on_duplicate_paths_ready)
+        self.backend_signals.source_resolution_ready.connect(self.on_source_resolution_ready)
 
         # Duplicate management
         self.window.dedup_info_requested.connect(self.on_dedup_info_requested)
         self.window.manage_duplicates_requested.connect(self.on_manage_duplicates_requested)
+
+        # ComfyUI source lineage (window -> controller only; never re-connect
+        # on soft restart, same rule as duplicate management above)
+        self.window.resolve_sources_requested.connect(self.on_resolve_sources_requested)
 
         # Visualization Widget
         self.window.visualizer_widget.data_loaded.connect(self.on_visualization_loaded)
@@ -124,6 +129,7 @@ class AppController(QObject):
             signals.tag_operation_failed.disconnect(self.on_tag_operation_failed)
             signals.deletion_completed.disconnect(self.on_backend_deletion_completed)
             signals.duplicate_paths_ready.disconnect(self.window._on_duplicate_paths_ready)
+            signals.source_resolution_ready.disconnect(self.on_source_resolution_ready)
         except (RuntimeError, AttributeError):
             pass  # Ignore disconnection errors
 
@@ -215,6 +221,7 @@ class AppController(QObject):
         self.backend_signals.tag_operation_failed.connect(self.on_tag_operation_failed)
         self.backend_signals.deletion_completed.connect(self.on_backend_deletion_completed)
         self.backend_signals.duplicate_paths_ready.connect(self.window._on_duplicate_paths_ready)
+        self.backend_signals.source_resolution_ready.connect(self.on_source_resolution_ready)
 
     @Slot()
     def on_backend_initialized(self):
@@ -729,6 +736,20 @@ class AppController(QObject):
     @Slot(str)
     def on_dedup_info_requested(self, filepath: str):
         self.backend_job_queue.put(("get_duplicate_paths", {"filepath": filepath}))
+
+    @Slot(str, list)
+    def on_resolve_sources_requested(self, target_filepath: str, source_filenames: list):
+        """Forward a ComfyUI source-lineage request to the backend worker."""
+        if not target_filepath or not source_filenames:
+            return
+        self.backend_job_queue.put(
+            ("resolve_sources", {"target_filepath": target_filepath, "source_filenames": list(source_filenames)})
+        )
+
+    @Slot(str, list)
+    def on_source_resolution_ready(self, target_filepath: str, resolved_items: list):
+        """Forward backend lineage results to the window (stale-guarded there)."""
+        self.window.on_source_resolution_ready(target_filepath, resolved_items)
 
     @Slot(list)
     def on_manage_duplicates_requested(self, filepaths: list):

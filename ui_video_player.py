@@ -5,14 +5,109 @@ import cv2
 
 from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QRect, QSize
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QResizeEvent, QKeyEvent, QWheelEvent, QDrag
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand, QFrame
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 
 import icons
+from ui_flow_layout import FlowLayout
+from loader_manager import get_loader_manager, thumbnail_cache
 from ui_thumbnails import NavThumbnail
 from metadata_utils import get_image_metadata, ImageMetadata
 
 logger = logging.getLogger(__name__)
+
+SOURCE_THUMB_SIZE = 40
+
+
+class SourceBadgeWidget(QFrame):
+    """Badge for one ComfyUI LoadImage reference: thumb + name + Jump/+Add."""
+
+    jump_requested = Signal(str)
+    add_query_requested = Signal(str)
+
+    def __init__(self, raw_filename: str, resolved_path: str | None = None, parent=None):
+        super().__init__(parent)
+        self.raw_filename = raw_filename
+        self.resolved_path = resolved_path
+        self._thumb_connected = False
+        self.setStyleSheet(
+            "SourceBadgeWidget { background-color: rgba(30, 30, 30, 200);"
+            " border: 1px solid #444; border-radius: 6px; }"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(8)
+
+        self.thumb_label = QLabel()
+        self.thumb_label.setFixedSize(SOURCE_THUMB_SIZE, SOURCE_THUMB_SIZE)
+        self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_label.setStyleSheet("border: none; background-color: #222; border-radius: 4px;")
+        layout.addWidget(self.thumb_label)
+
+        if resolved_path:
+            cached = thumbnail_cache.get(resolved_path)
+            if cached:
+                self._apply_pixmap(cached)
+            else:
+                self.thumb_label.setText("...")
+                get_loader_manager().thumbnail_loaded.connect(self._on_thumbnail_ready)
+                self._thumb_connected = True
+                get_loader_manager().request_thumbnail(resolved_path)
+        else:
+            self.thumb_label.setText("?")
+
+        name = Path(raw_filename).name
+        short = name if len(name) <= 20 else name[:9] + "..." + name[-8:]
+        name_label = QLabel(short)
+        name_label.setToolTip(raw_filename if resolved_path is None else f"{raw_filename}\n{resolved_path}")
+        name_label.setStyleSheet("border: none; color: #ddd; font-size: 11px;")
+        layout.addWidget(name_label, 1)
+
+        if resolved_path:
+            jump_btn = QPushButton("🔍")
+            jump_btn.setFixedSize(22, 22)
+            jump_btn.setToolTip(f"Jump to image:\n{resolved_path}")
+            jump_btn.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
+            jump_btn.clicked.connect(lambda: self.jump_requested.emit(self.resolved_path))
+            layout.addWidget(jump_btn)
+
+            add_btn = QPushButton("+")
+            add_btn.setFixedSize(22, 22)
+            add_btn.setToolTip(f"Add to search query:\n{resolved_path}")
+            add_btn.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
+            add_btn.clicked.connect(lambda: self.add_query_requested.emit(self.resolved_path))
+            layout.addWidget(add_btn)
+        else:
+            missing_label = QLabel("(unindexed)")
+            missing_label.setStyleSheet("border: none; color: #777; font-style: italic; font-size: 10px;")
+            layout.addWidget(missing_label)
+
+    def _apply_pixmap(self, pixmap: QPixmap):
+        scaled = pixmap.scaled(
+            SOURCE_THUMB_SIZE,
+            SOURCE_THUMB_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.thumb_label.setPixmap(scaled)
+
+    @Slot(str)
+    def _on_thumbnail_ready(self, filepath: str):
+        if filepath == self.resolved_path:
+            cached = thumbnail_cache.get(self.resolved_path)
+            if cached:
+                self._apply_pixmap(cached)
+            self.dispose()  # one-shot: stop listening once our thumb arrived
+
+    def dispose(self):
+        """Disconnect the shared thumbnail signal (avoids slot leaks on clear)."""
+        if not self._thumb_connected:
+            return
+        self._thumb_connected = False
+        try:
+            get_loader_manager().thumbnail_loaded.disconnect(self._on_thumbnail_ready)
+        except (RuntimeError, AttributeError):
+            pass
 
 
 class CroppableLabel(QLabel):
@@ -96,6 +191,8 @@ class SingleMediaViewer(QWidget):
     closed = Signal()
     next_requested = Signal()
     prev_requested = Signal()
+    source_jump_requested = Signal(str)        # resolved filepath to navigate to
+    source_add_query_requested = Signal(str)   # resolved filepath to stage in query builder
 
     # Approximate nudge used only when the OpenCV grabber is unavailable.
     _FALLBACK_STEP_MS = 33
@@ -192,6 +289,18 @@ class SingleMediaViewer(QWidget):
             "color: #f0f0f0; font-size: 12px; background: transparent;"
         )
         info_panel_layout.addWidget(self._info_label)
+
+        # ComfyUI source lineage badges (populated async via set_resolved_sources)
+        self._sources_header = QLabel("Sources referenced by this workflow:")
+        self._sources_header.setStyleSheet("border: none; color: #aaa; font-size: 11px;")
+        self._sources_header.setVisible(False)
+        info_panel_layout.addWidget(self._sources_header)
+
+        self._sources_container = QWidget()
+        self._sources_container.setStyleSheet("border: none; background: transparent;")
+        self._sources_layout = FlowLayout(self._sources_container, spacing=6)
+        self._sources_container.setVisible(False)
+        info_panel_layout.addWidget(self._sources_container)
 
         self._info_panel.setStyleSheet(
             "background-color: rgba(10, 10, 10, 175); border-radius: 8px;"
@@ -291,6 +400,8 @@ class SingleMediaViewer(QWidget):
         # Stop playback before loading new media
         self._stop_playback()
         self._close_step_grabber()
+        # Drop previous lineage badges; fresh ones arrive async (if any).
+        self.clear_sources()
 
         if not current_path:
             self.video_label.setPixmap(QPixmap())
@@ -630,6 +741,43 @@ class SingleMediaViewer(QWidget):
                     truncated += "…"
                 lines.append(f"Prompt: <i>{truncated}</i>")
         return "<br>".join(lines)
+
+    def get_current_metadata(self) -> ImageMetadata | None:
+        """Return the metadata extracted for the currently displayed media."""
+        return self._metadata
+
+    def clear_sources(self):
+        """Remove all lineage badges, disconnecting their thumbnail slots."""
+        while self._sources_layout.count():
+            item = self._sources_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                if isinstance(widget, SourceBadgeWidget):
+                    widget.dispose()
+                widget.deleteLater()
+        self._sources_header.setVisible(False)
+        self._sources_container.setVisible(False)
+        self._reposition_overlays()
+
+    def set_resolved_sources(self, resolved_items: list):
+        """Render ComfyUI source badges from backend results.
+
+        Each item: {"raw_filename": str, "resolved_path": str | None}.
+        Never dereferences a None path; unindexed files show a badge with
+        the recorded filename only.
+        """
+        self.clear_sources()
+        if not resolved_items:
+            return
+        for item in resolved_items:
+            raw = item.get("raw_filename", "?")
+            badge = SourceBadgeWidget(raw, item.get("resolved_path"), parent=self._sources_container)
+            badge.jump_requested.connect(self.source_jump_requested.emit)
+            badge.add_query_requested.connect(self.source_add_query_requested.emit)
+            self._sources_layout.addWidget(badge)
+        self._sources_header.setVisible(True)
+        self._sources_container.setVisible(True)
+        self._reposition_overlays()
 
     def _update_info_panel(self):
         if self._metadata is None:

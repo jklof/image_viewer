@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import re
 import sqlite3
 import threading
 import queue
@@ -133,6 +134,17 @@ def _targeted_hashing_and_resize_worker(filepath: Path, mtime: float) -> tuple[P
     except Exception as e:
         logger.warning(f"Unexpected error processing {filepath}: {e}")
         return filepath, INVALID_FILE_SENTINEL, mtime, None
+
+
+def clean_comfy_filename(raw_name: str) -> tuple[str, str]:
+    """Strip ComfyUI filename tags: 'sub/photo.png [input]' -> ('sub/photo.png', 'input')."""
+    raw_name = raw_name.replace("\\", "/").strip()
+    tag = ""
+    match = re.search(r"\s*\[(input|temp|output)\]$", raw_name, re.IGNORECASE)
+    if match:
+        tag = match.group(1).lower()
+        raw_name = raw_name[: match.start()].strip()
+    return raw_name, tag
 
 
 class EmbeddingConsumerThread(threading.Thread):
@@ -913,6 +925,107 @@ class ImageDatabase:
             except OSError:
                 result.append({"filepath": p, "size": 0, "mtime": 0.0})
         return result
+
+    def resolve_source_image(
+        self,
+        raw_filename: str,
+        target_mtime: float,
+        target_sha: str | None = None,
+        target_filepath: str | None = None,
+    ) -> str | None:
+        """Heuristically resolve a ComfyUI LoadImage filename to a local filepath.
+
+        Uses only the existing filepaths table plus the in-memory embedding
+        matrix (no schema changes). Returns None when no candidate passes the
+        confidence threshold.
+        """
+        clean_name, tag = clean_comfy_filename(raw_filename)
+        ref_path = Path(clean_name)
+        target_filename = ref_path.name
+        rel_subpath = ref_path.as_posix()
+        if not target_filename:
+            return None
+
+        with self._get_db_connection() as conn:
+            # Broad pre-filter; the exact filename is checked in Python below
+            # so '%' and '_' in filenames cannot act as LIKE wildcards.
+            raw_rows = conn.execute(
+                "SELECT filepath, sha256, mtime FROM filepaths WHERE filepath LIKE '%' || ?",
+                (target_filename,),
+            ).fetchall()
+
+        # Exact filename match + self-match exclusion (by SHA and by path).
+        rows = []
+        for fp, sha, mt in raw_rows:
+            if Path(fp).name != target_filename:
+                continue
+            if target_sha and sha == target_sha:
+                continue
+            if target_filepath and fp == target_filepath:
+                continue
+            rows.append((fp, sha, mt))
+
+        if not rows:
+            return None
+
+        # Single match + temporal causality check.
+        if len(rows) == 1:
+            cand_path, _, cand_mtime = rows[0]
+            if cand_mtime <= (target_mtime + 5.0):
+                return cand_path
+
+        # O(1) hash-to-index map built once per call (never scan the list).
+        sha_to_idx = {sha: i for i, sha in enumerate(self._shas_in_order)}
+
+        target_emb = None
+        if target_sha and self._embedding_matrix is not None:
+            t_idx = sha_to_idx.get(target_sha)
+            if t_idx is not None:
+                target_emb = self._embedding_matrix[t_idx]
+
+        scored = []
+        for filepath, sha256, mtime in rows:
+            # 1. Temporal causality: a source cannot be modified after its target.
+            if mtime > (target_mtime + 5.0):
+                continue
+
+            norm_path = filepath.replace("\\", "/")
+            lower_path = norm_path.lower()
+            score = 0.0
+
+            # 2. Relative subpath match.
+            if norm_path.endswith(rel_subpath):
+                score += 40.0
+            else:
+                score += 10.0
+
+            # 3. ComfyUI folder priors.
+            if "/input/" in lower_path or "/inputs/" in lower_path:
+                score += 30.0
+            elif "/output/" in lower_path or "/outputs/" in lower_path:
+                score += 25.0
+            elif "/temp/" in lower_path:
+                score += 15.0
+
+            if tag and f"/{tag}/" in lower_path:
+                score += 20.0
+
+            # 4. CLIP semantic verification (tie-breaker).
+            if target_emb is not None:
+                c_idx = sha_to_idx.get(sha256)
+                if c_idx is not None:
+                    cand_emb = self._embedding_matrix[c_idx]
+                    sim = float(np.dot(target_emb, cand_emb))
+                    score += max(0.0, sim) * 30.0
+
+            scored.append((score, filepath))
+
+        if not scored:
+            return None
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_filepath = scored[0]
+        return best_filepath if best_score >= 30.0 else None
 
     def _get_sha256_for_filepaths(self, filepath_list: list[str]) -> list[str]:
         """Convert filepaths to their corresponding SHA256 hashes."""

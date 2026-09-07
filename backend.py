@@ -29,6 +29,7 @@ class BackendSignals(QObject):
     tag_operation_failed = Signal(list, int)
     deletion_completed = Signal()
     duplicate_paths_ready = Signal(list)  # list of dicts from get_duplicate_paths
+    source_resolution_ready = Signal(str, list)  # target_filepath, list of {raw_filename, resolved_path}
 
 
 class BackendWorker:
@@ -322,6 +323,50 @@ class BackendWorker:
             filepath = payload.get("filepath", "")
             paths = self.db.get_duplicate_paths(filepath)
             self.signals.duplicate_paths_ready.emit(paths)
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def handle_resolve_sources(self, payload: dict):
+        """Resolve ComfyUI LoadImage filenames to local filepaths (async).
+
+        Payload: {"target_filepath": str, "source_filenames": [str, ...]}.
+        mtime/sha come from SQLite — no GUI-thread stat() needed.
+        """
+        try:
+            if not self.db:
+                return
+            target_filepath = payload.get("target_filepath", "")
+            source_filenames = payload.get("source_filenames", [])
+            if not target_filepath or not source_filenames:
+                return
+
+            # Prime lazy RAM caches so sha lookups and CLIP tie-breaks work
+            # even if no search has run yet in this session.
+            if self.db._sha_to_path_map_cache is None:
+                self.db._build_memory_caches()
+
+            with self.db._get_db_connection() as conn:
+                row = conn.execute(
+                    "SELECT sha256, mtime FROM filepaths WHERE filepath = ?", (target_filepath,)
+                ).fetchone()
+
+            if not row:
+                self.signals.source_resolution_ready.emit(target_filepath, [])
+                return
+
+            target_sha, target_mtime = row[0], row[1]
+
+            results = []
+            for filename in source_filenames:
+                resolved_path = self.db.resolve_source_image(
+                    raw_filename=filename,
+                    target_mtime=target_mtime,
+                    target_sha=target_sha,
+                    target_filepath=target_filepath,
+                )
+                results.append({"raw_filename": filename, "resolved_path": resolved_path})
+
+            self.signals.source_resolution_ready.emit(target_filepath, results)
         except Exception:
             logger.error(traceback.format_exc())
 
