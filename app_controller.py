@@ -58,6 +58,7 @@ class AppController(QObject):
         self._tagged_only_filter = False
         self._current_results_generation = 0
         self._pending_scroll_state = None
+        self._pending_single_view_fp = None
 
         self._connect_signals()
 
@@ -200,6 +201,8 @@ class AppController(QObject):
         # Clear cached data as it may be invalid with new configuration
         self._cached_visualization_data = None
         self._visualization_data_dirty = True
+        self._pending_single_view_fp = None
+        self._pending_scroll_state = None
 
         logger.info("Soft restart completed successfully.")
 
@@ -239,8 +242,15 @@ class AppController(QObject):
         self.window.update_status_bar(message)
         QMessageBox.warning(self.window, "Search Failed", message)
 
+    def _capture_single_view_anchor(self):
+        if self.window.content_stack.currentWidget() is self.window.single_image_view_widget:
+            self._pending_single_view_fp = self.window.single_image_view_widget.current_filepath
+        else:
+            self._pending_single_view_fp = None
+
     @Slot(list)
     def on_composite_search_requested(self, query_elements: list):
+        self._capture_single_view_anchor()
         self.window.clear_results()
         self.window.show_loading_state("Constructing query...")
         self.window.set_controls_enabled(False)
@@ -250,6 +260,7 @@ class AppController(QObject):
 
     @Slot()
     def on_random_order_requested(self):
+        self._capture_single_view_anchor()
         self.window.clear_results()
         self.window.show_loading_state("Randomly reordering...")
         self.window.set_controls_enabled(False)
@@ -258,6 +269,7 @@ class AppController(QObject):
 
     @Slot()
     def on_sort_by_date_requested(self):
+        self._capture_single_view_anchor()
         self.window.clear_results()
         self.window.show_loading_state("Sorting images by date...")
         self.window.set_controls_enabled(False)
@@ -279,23 +291,45 @@ class AppController(QObject):
     @Slot(list)
     def on_results_ready(self, results: list):
         self._current_results_generation = (self._current_results_generation + 1) % 1000000
+
+        anchor_fp = self._pending_single_view_fp
+        self._pending_single_view_fp = None  # Consume latch
+
+        pending_scroll = self._pending_scroll_state
+        self._pending_scroll_state = None  # Consume scroll state
+
         if not results:
+            self.window.current_single_view_index = -1
             if self._tagged_only_filter:
                 self.window.show_no_tags_view()
             else:
                 self.window.show_sync_prompt_view()
             return
 
-        self.window.set_results_data(results)
-        self.window.show_results_view()
-        self.window.update_status_bar(f"Ordering complete. Displaying all {len(results)} images.")
+        was_in_single_view = (anchor_fp is not None) or (
+            self.window.content_stack.currentWidget() is self.window.single_image_view_widget
+        )
+        if not anchor_fp and was_in_single_view:
+            anchor_fp = self.window.single_image_view_widget.current_filepath
+
+        # Update model
+        self.window.results_model.set_results(results)
+
+        if was_in_single_view and anchor_fp:
+            # Re-anchor to the active file at its new row location
+            self.window.handle_dataset_updated(preferred_filepath=anchor_fp, file_deleted=False)
+            self.window.update_status_bar(f"Data reloaded. Viewing {Path(anchor_fp).name}.")
+        else:
+            # Grid View branch
+            self.window.current_single_view_index = -1  # Reset stale index
+            self.window.show_results_view()
+            self.window.update_status_bar(f"Ordering complete. Displaying all {len(results)} images.")
+            if pending_scroll is not None:
+                val, max_val = pending_scroll
+                QTimer.singleShot(50, lambda: self.window.restore_scroll_state(val, max_val))
+
         self.window.set_controls_enabled(True)
         self.window.set_sync_controls_enabled(True)
-
-        if self._pending_scroll_state is not None:
-            val, max_val = self._pending_scroll_state
-            QTimer.singleShot(50, lambda: self.window.restore_scroll_state(val, max_val))
-            self._pending_scroll_state = None
 
     @Slot(list)
     def on_visualization_data_ready(self, plot_data: list):
@@ -631,6 +665,11 @@ class AppController(QObject):
 
     @Slot(list, str)
     def _on_delete_completed(self, deleted_filepaths: list, message: str):
+        is_in_single_view = (
+            self.window.content_stack.currentWidget() is self.window.single_image_view_widget
+        )
+        active_fp = self.window.single_image_view_widget.current_filepath if is_in_single_view else None
+
         # Save scroll state
         scroll_val, scroll_max = self.window.get_scroll_state()
 
@@ -669,8 +708,21 @@ class AppController(QObject):
         self.window.results_model.set_results(new_results)
         self.window.update_status_bar(message)
 
-        # Restore scroll state
-        self.window.restore_scroll_state(scroll_val, scroll_max)
+        # Consume any stale pending scroll (e.g. set by
+        # on_manage_duplicates_requested) so it doesn't misfire on the next
+        # on_results_ready. Scroll is handled explicitly below.
+        self._pending_scroll_state = None
+
+        if is_in_single_view:
+            if active_fp in deleted_filepaths_set:
+                # Active file deleted: advance to clamped index
+                self.window.handle_dataset_updated(preferred_filepath=None, file_deleted=True)
+            else:
+                # Surviving file: re-anchor row index, refresh dup badges and thumbnails
+                self.window.handle_dataset_updated(preferred_filepath=active_fp, file_deleted=False)
+        else:
+            # Restore scroll state
+            self.window.restore_scroll_state(scroll_val, scroll_max)
         # We DON'T enable controls here, because the DB deletion job might still be in the backend queue.
         # We wait for on_backend_deletion_completed.
 
@@ -725,6 +777,9 @@ class AppController(QObject):
         """Filter results to show only tagged images."""
         # Trigger a refresh with the tagged_only filter
         self._tagged_only_filter = checked
+
+        # Preserve single-view anchor across the loading overlay (nit fix).
+        self._capture_single_view_anchor()
 
         # Determine current search mode and re-trigger with filter
         # For simplicity, we'll just trigger a random search with the filter

@@ -4,7 +4,7 @@ import threading
 
 import cv2
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl, QRect, QTimer, QThread
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QModelIndex, QSize, QMimeData, QUrl, QRect, QTimer, QThread, QItemSelectionModel
 from PySide6.QtGui import (
     QAction,
     QPixmap,
@@ -556,11 +556,97 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget.setFocus()
         self._update_toggle_view_button_state()
 
+    def _sync_grid_to_filepath(self, target_filepath: str | None = None):
+        """
+        Synchronizes grid selection, focus, and scroll position to target_filepath.
+        Falls back to current_single_view_index if target_filepath is not found.
+        """
+        if not target_filepath and self.single_image_view_widget:
+            target_filepath = self.single_image_view_widget.current_filepath
+
+        target_row = -1
+        if target_filepath:
+            rows = self.results_model._filepath_to_row_map.get(target_filepath, [])
+            if rows:
+                target_row = rows[0]
+
+        if target_row == -1 and (0 <= self.current_single_view_index < self.results_model.rowCount()):
+            target_row = self.current_single_view_index
+
+        if target_row == -1 or self.results_model.rowCount() == 0:
+            return
+
+        self.current_single_view_index = target_row
+        index = self.results_model.index(target_row, 0)
+        if not index.isValid():
+            return
+
+        selection_model = self.results_view.selectionModel()
+        if selection_model:
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect
+            )
+
+        self.results_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.results_view.setFocus()
+
+    def handle_dataset_updated(self, preferred_filepath: str | None = None, file_deleted: bool = False):
+        """
+        Called when model data changes while the window is active.
+        Maintains Single View anchored to preferred_filepath or advances if deleted.
+        """
+        total = self.results_model.rowCount()
+        if total == 0:
+            self.current_single_view_index = -1
+            self.clear_results()
+            self.show_results_view()
+            return
+
+        current_widget = self.content_stack.currentWidget()
+        is_in_single_view = (current_widget is self.single_image_view_widget)
+        # Reload path: on_results_ready shows loading_overlay after latching the
+        # anchor, so treat loading + valid anchor as single-view intent.
+        # _on_delete_completed calls from true single view; grid callers pass
+        # preferred only to sync scroll/selection (else branch below).
+        is_reload_return = (
+            not is_in_single_view
+            and not file_deleted
+            and preferred_filepath
+            and current_widget is self.loading_overlay_widget
+        )
+
+        if is_in_single_view or is_reload_return:
+            anchor_fp = preferred_filepath if not file_deleted else None
+            if anchor_fp is None and not file_deleted:
+                anchor_fp = self.single_image_view_widget.current_filepath
+
+            rows = self.results_model._filepath_to_row_map.get(anchor_fp, []) if anchor_fp else []
+
+            if rows:
+                # Anchor file exists: update index and refresh media view chrome
+                self.current_single_view_index = rows[0]
+                self._update_single_image_view_pixmap()
+                self._update_single_view_tag_state()
+                self.content_stack.setCurrentWidget(self.single_image_view_widget)
+            else:
+                # Anchor file missing or deleted: clamp index and show next surviving item
+                clamped_idx = max(0, min(self.current_single_view_index, total - 1))
+                self.current_single_view_index = clamped_idx
+                self._show_current_single_image()
+        else:
+            if preferred_filepath:
+                self._sync_grid_to_filepath(preferred_filepath)
+
     @Slot()
     def _return_to_grid_view(self):
+        target_fp = self.single_image_view_widget.current_filepath
         self.content_stack.setCurrentWidget(self.results_view)
         self.update_status_bar("Ready")
         self._update_toggle_view_button_state()
+
+        self._sync_grid_to_filepath(target_fp)
+        QTimer.singleShot(0, lambda: self._sync_grid_to_filepath(target_fp))
 
     @Slot()
     def _on_toggle_view_clicked(self):
@@ -571,7 +657,10 @@ class MainWindow(QMainWindow):
         if current_widget is self.single_image_view_widget or current_widget is self.visualizer_widget:
             self._return_to_grid_view()
         else:
-            if self.current_single_view_index == -1:
+            selected_indexes = self.results_view.selectionModel().selectedIndexes()
+            if selected_indexes:
+                self.current_single_view_index = selected_indexes[0].row()
+            elif self.current_single_view_index == -1:
                 self.current_single_view_index = 0
 
             self._show_current_single_image()
