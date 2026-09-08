@@ -40,23 +40,30 @@ def get_image_metadata(filepath: str) -> ImageMetadata:
         with Image.open(filepath) as img:
             metadata.width, metadata.height = img.size
 
-            # ComfyUI stores the executable API graph JSON in the "prompt" key.
-            # PNG: tEXt chunk -> img.info["prompt"]. JPEG: EXIF UserComment
-            # (0x9286 in the Exif sub-IFD 0x8769). Comfy-JPEG only per scope.
-            raw_json = img.info.get("prompt")
-            if not raw_json:
-                raw_json = _get_exif_user_comment(img)
-            if raw_json:
-                comfy_data = _parse_comfy_workflow(str(raw_json))
-                if comfy_data:
-                    metadata.has_comfy_workflow = True
-                    metadata.comfy_model = comfy_data.get("comfy_model")
-                    metadata.comfy_positive_prompt = comfy_data.get("comfy_positive_prompt")
-                    metadata.comfy_sampler = comfy_data.get("comfy_sampler")
-                    metadata.comfy_steps = comfy_data.get("comfy_steps")
-                    metadata.comfy_cfg = comfy_data.get("comfy_cfg")
-                    metadata.comfy_scheduler = comfy_data.get("comfy_scheduler")
-                    metadata.source_images = list(comfy_data.get("source_images", []))
+            # ComfyUI stores the executable API graph JSON in the "prompt" key
+            # and the UI graph JSON in the "workflow" key (PNG tEXt chunks).
+            # JPEG: EXIF UserComment (see _get_exif_user_comment).
+            # First payload that parses wins (a corrupt "prompt" falls
+            # through to "workflow" instead of silently yielding nothing).
+            comfy_data: dict = {}
+            for candidate in (img.info.get("prompt"), img.info.get("workflow")):
+                if candidate:
+                    comfy_data = _parse_comfy_workflow(str(candidate))
+                    if comfy_data:
+                        break
+            if not comfy_data:
+                exif_json = _get_exif_user_comment(img)
+                if exif_json:
+                    comfy_data = _parse_comfy_workflow(str(exif_json))
+            if comfy_data:
+                metadata.has_comfy_workflow = True
+                metadata.comfy_model = comfy_data.get("comfy_model")
+                metadata.comfy_positive_prompt = comfy_data.get("comfy_positive_prompt")
+                metadata.comfy_sampler = comfy_data.get("comfy_sampler")
+                metadata.comfy_steps = comfy_data.get("comfy_steps")
+                metadata.comfy_cfg = comfy_data.get("comfy_cfg")
+                metadata.comfy_scheduler = comfy_data.get("comfy_scheduler")
+                metadata.source_images = list(comfy_data.get("source_images", []))
 
     except Exception:
         logger.exception("Failed to extract metadata from %s", filepath)
@@ -128,6 +135,10 @@ def _parse_comfy_workflow(raw_json: str) -> dict:
     - ``"LoadImage"`` / ``"LoadImageMask"``: collect ``inputs["image"]``
       filenames (deduped) into ``source_images`` for workflow lineage.
 
+    Also accepts the UI-format graph (``img.info["workflow"]``):
+    ``{"nodes": [{"type": ..., "widgets_values": [...]}]}`` — only the
+    loader filenames are collected from it (no sampler/model parsing).
+
     If JSON parsing fails or any key is missing, catch the exception silently and
     return whatever was successfully extracted. ``has_comfy_workflow`` is set to
     ``True`` only if at least one ComfyUI-specific node was found.
@@ -198,16 +209,35 @@ def _parse_comfy_workflow(raw_json: str) -> dict:
         # heuristic and happens later in ImageDatabase.resolve_source_image.
         seen_sources: set[str] = set()
         source_images: list[str] = []
+
+        def _add_source(name) -> None:
+            if name and isinstance(name, str) and name not in seen_sources:
+                seen_sources.add(name)
+                source_images.append(name)
+
         for node in nodes.values():
             if not isinstance(node, dict):
                 continue
             if node.get("class_type") in ("LoadImage", "LoadImageMask"):
-                name = node.get("inputs", {}).get("image")
-                if name and isinstance(name, str) and name not in seen_sources:
-                    seen_sources.add(name)
-                    source_images.append(name)
+                _add_source(node.get("inputs", {}).get("image"))
+
+        # UI-format fallback: {"nodes": [{"type": "LoadImage",
+        # "widgets_values": ["file.png", ...]}]}. Only loader filenames are
+        # collected here; sampler/model parsing needs the API format.
+        ui_nodes = data.get("nodes") if isinstance(data, dict) else None
+        if isinstance(ui_nodes, list):
+            for node in ui_nodes:
+                if not isinstance(node, dict):
+                    continue
+                if node.get("type") in ("LoadImage", "LoadImageMask"):
+                    values = node.get("widgets_values")
+                    if isinstance(values, list) and values:
+                        _add_source(values[0])
+
         if source_images:
             result["source_images"] = source_images
+            # Loader references alone prove a ComfyUI graph was embedded.
+            found_comfy_node = True
 
     except Exception:
         logger.exception("Error parsing ComfyUI workflow")

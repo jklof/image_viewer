@@ -968,11 +968,17 @@ class ImageDatabase:
         if not rows:
             return None
 
-        # Single match + temporal causality check.
+        # Single exact match: trust the filename even if the file was
+        # copied/moved/touched after the target was generated (mtime newer).
+        # A unique filename in the library is near-certainly the source.
         if len(rows) == 1:
             cand_path, _, cand_mtime = rows[0]
-            if cand_mtime <= (target_mtime + 5.0):
-                return cand_path
+            if cand_mtime > (target_mtime + 5.0):
+                logger.info(
+                    f"Source '{target_filename}' matched uniquely but is newer "
+                    f"than its target (likely copied/moved); accepting anyway."
+                )
+            return cand_path
 
         # O(1) hash-to-index map built once per call (never scan the list).
         sha_to_idx = {sha: i for i, sha in enumerate(self._shas_in_order)}
@@ -985,13 +991,15 @@ class ImageDatabase:
 
         scored = []
         for filepath, sha256, mtime in rows:
-            # 1. Temporal causality: a source cannot be modified after its target.
-            if mtime > (target_mtime + 5.0):
-                continue
-
+            # 1. Temporal causality is a score signal, not a hard filter:
+            # copied/moved inputs are often newer than their outputs.
             norm_path = filepath.replace("\\", "/")
             lower_path = norm_path.lower()
             score = 0.0
+            if mtime <= (target_mtime + 5.0):
+                score += 20.0
+            else:
+                score -= 10.0
 
             # 2. Relative subpath match.
             if norm_path.endswith(rel_subpath):

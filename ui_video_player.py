@@ -3,9 +3,9 @@ from pathlib import Path
 
 import cv2
 
-from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QRect, QSize
+from PySide6.QtCore import Signal, Qt, Slot, QPoint, QUrl, QMimeData, QRect, QSize, QEvent, QTimer
 from PySide6.QtGui import QImage, QPixmap, QMouseEvent, QResizeEvent, QKeyEvent, QWheelEvent, QDrag
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand, QFrame
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSlider, QSizePolicy, QFileDialog, QRubberBand, QFrame, QDialog, QScrollArea, QLineEdit
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 
 import icons
@@ -17,29 +17,42 @@ from metadata_utils import get_image_metadata, ImageMetadata
 logger = logging.getLogger(__name__)
 
 SOURCE_THUMB_SIZE = 40
+SOURCE_THUMB_COMPACT = 28
+# Max lineage badges shown inline in the info overlay; overflow goes to a dialog.
+INLINE_SOURCE_CAP = 4
 
 
 class SourceBadgeWidget(QFrame):
-    """Badge for one ComfyUI LoadImage reference: thumb + name + Jump/+Add."""
+    """Badge for one ComfyUI LoadImage reference: thumb + name + Jump/+Add.
+
+    compact=True renders a smaller single-row chip for the inline overlay;
+    the dialog uses the full-size variant.
+    """
 
     jump_requested = Signal(str)
     add_query_requested = Signal(str)
 
-    def __init__(self, raw_filename: str, resolved_path: str | None = None, parent=None):
+    def __init__(self, raw_filename: str, resolved_path: str | None = None, parent=None, compact: bool = False):
         super().__init__(parent)
         self.raw_filename = raw_filename
         self.resolved_path = resolved_path
         self._thumb_connected = False
+        self._press_pos: QPoint | None = None
+        self._feedback_timer: QTimer | None = None
+        thumb_size = SOURCE_THUMB_COMPACT if compact else SOURCE_THUMB_SIZE
+        self._thumb_size = thumb_size
+        name_limit = 14 if compact else 20
+        btn_size = 20 if compact else 22
         self.setStyleSheet(
             "SourceBadgeWidget { background-color: rgba(30, 30, 30, 200);"
             " border: 1px solid #444; border-radius: 6px; }"
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(8)
+        layout.setContentsMargins(5, 3, 5, 3)
+        layout.setSpacing(6)
 
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(SOURCE_THUMB_SIZE, SOURCE_THUMB_SIZE)
+        self.thumb_label.setFixedSize(thumb_size, thumb_size)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet("border: none; background-color: #222; border-radius: 4px;")
         layout.addWidget(self.thumb_label)
@@ -57,7 +70,11 @@ class SourceBadgeWidget(QFrame):
             self.thumb_label.setText("?")
 
         name = Path(raw_filename).name
-        short = name if len(name) <= 20 else name[:9] + "..." + name[-8:]
+        if len(name) <= name_limit:
+            short = name
+        else:
+            keep = max(1, (name_limit - 3) // 2)
+            short = name[:keep] + "..." + name[-keep:]
         name_label = QLabel(short)
         name_label.setToolTip(raw_filename if resolved_path is None else f"{raw_filename}\n{resolved_path}")
         name_label.setStyleSheet("border: none; color: #ddd; font-size: 11px;")
@@ -65,27 +82,28 @@ class SourceBadgeWidget(QFrame):
 
         if resolved_path:
             jump_btn = QPushButton("🔍")
-            jump_btn.setFixedSize(22, 22)
+            jump_btn.setFixedSize(btn_size, btn_size)
             jump_btn.setToolTip(f"Jump to image:\n{resolved_path}")
             jump_btn.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
             jump_btn.clicked.connect(lambda: self.jump_requested.emit(self.resolved_path))
             layout.addWidget(jump_btn)
 
-            add_btn = QPushButton("+")
-            add_btn.setFixedSize(22, 22)
-            add_btn.setToolTip(f"Add to search query:\n{resolved_path}")
-            add_btn.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
-            add_btn.clicked.connect(lambda: self.add_query_requested.emit(self.resolved_path))
-            layout.addWidget(add_btn)
+            self.add_btn = QPushButton("+")
+            self.add_btn.setFixedSize(btn_size, btn_size)
+            self.add_btn.setToolTip(f"Add to search query:\n{resolved_path}")
+            self.add_btn.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
+            self.add_btn.clicked.connect(self._on_add_clicked)
+            layout.addWidget(self.add_btn)
         else:
-            missing_label = QLabel("(unindexed)")
-            missing_label.setStyleSheet("border: none; color: #777; font-style: italic; font-size: 10px;")
-            layout.addWidget(missing_label)
+            self.add_btn = None
+            self.missing_label = QLabel("(unindexed)")
+            self.missing_label.setStyleSheet("border: none; color: #777; font-style: italic; font-size: 10px;")
+            layout.addWidget(self.missing_label)
 
     def _apply_pixmap(self, pixmap: QPixmap):
         scaled = pixmap.scaled(
-            SOURCE_THUMB_SIZE,
-            SOURCE_THUMB_SIZE,
+            self._thumb_size,
+            self._thumb_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -109,6 +127,223 @@ class SourceBadgeWidget(QFrame):
         except (RuntimeError, AttributeError):
             pass
 
+    def mousePressEvent(self, event: QMouseEvent):
+        # Record press for click detection, and swallow it so it doesn't
+        # bubble up to the viewer (which would start a file drag instead).
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
+            start = self._press_pos
+            self._press_pos = None
+            if (event.pos() - start).manhattanLength() < 6:
+                # Plain click on badge chrome (not a button — those consume
+                # their own presses): resolved jumps, unindexed copies name.
+                if self.resolved_path:
+                    self.jump_requested.emit(self.resolved_path)
+                else:
+                    self._copy_filename_to_clipboard()
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self.resolved_path:
+            self.jump_requested.emit(self.resolved_path)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Inside a scrollable dialog the badge spans the viewport width and
+        # would otherwise eat the wheel: forward it to the enclosing
+        # QScrollArea. Inline (no scroll area) just swallow it so the viewer
+        # doesn't switch to the next/previous image.
+        p = self.parent()
+        while p is not None:
+            if isinstance(p, QScrollArea):
+                QApplication.sendEvent(p.viewport(), event)
+                return
+            p = p.parent()
+        event.accept()
+
+    @Slot()
+    def _on_add_clicked(self):
+        self.add_query_requested.emit(self.resolved_path)
+        # Inline confirmation: the query builder + status bar live behind the
+        # modal dialog, so acknowledge here too.
+        if self.add_btn is not None:
+            self.add_btn.setText("✓")
+            if self._feedback_timer is None:
+                self._feedback_timer = QTimer(self)
+                self._feedback_timer.setSingleShot(True)
+                self._feedback_timer.timeout.connect(self._restore_add_button)
+            self._feedback_timer.start(1200)
+
+    @Slot()
+    def _restore_add_button(self):
+        if self.add_btn is not None:
+            self.add_btn.setText("+")
+
+    def _copy_filename_to_clipboard(self):
+        """Unindexed badges have no file action; offer the recorded name."""
+        try:
+            QApplication.clipboard().setText(Path(self.raw_filename).name)
+        except Exception:
+            return
+        if getattr(self, "missing_label", None) is not None:
+            self.missing_label.setText("(copied ✓)")
+            # Bound-method singleShot: safely dropped if the badge is gone.
+            QTimer.singleShot(1200, self._restore_missing_label)
+
+    @Slot()
+    def _restore_missing_label(self):
+        if getattr(self, "missing_label", None) is not None:
+            try:
+                self.missing_label.setText("(unindexed)")
+            except RuntimeError:
+                pass  # badge already destroyed
+
+
+class SourceLineageDialog(QDialog):
+    """Scrollable overflow dialog for workflow sources beyond the inline cap.
+
+    Reuses SourceBadgeWidget rows. Jump closes the dialog (navigation would
+    otherwise happen behind the modal); +Add and Add-all keep it open.
+    """
+
+    jump_requested = Signal(str)
+    add_query_requested = Signal(str)
+    add_all_requested = Signal(list)  # all resolved filepaths
+
+    def __init__(self, target_name: str, resolved_items: list, parent=None):
+        super().__init__(parent)
+        self._badges: list[SourceBadgeWidget] = []
+        self.setWindowTitle(f"Workflow sources — {target_name} ({len(resolved_items)})")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(300)
+
+        layout = QVBoxLayout(self)
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter sources by name...")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self._on_filter_changed)
+        self.filter_edit.returnPressed.connect(self._on_filter_accepted)
+        layout.addWidget(self.filter_edit)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._scroll = scroll
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(6)
+        for item in resolved_items:
+            badge = SourceBadgeWidget(
+                item.get("raw_filename", "?"), item.get("resolved_path"), parent=content
+            )
+            badge.jump_requested.connect(self._on_badge_jump)
+            badge.add_query_requested.connect(self.add_query_requested.emit)
+            content_layout.addWidget(badge)
+            self._badges.append(badge)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        resolved_paths = [i.get("resolved_path") for i in resolved_items if i.get("resolved_path")]
+        self.add_all_btn = QPushButton(f"Add all resolved ({len(resolved_paths)})")
+        self.add_all_btn.setEnabled(bool(resolved_paths))
+        self.add_all_btn.setToolTip("Stage every resolved source in the search query")
+        self.add_all_btn.clicked.connect(self._on_add_all_clicked)
+        btn_row.addWidget(self.add_all_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    @Slot()
+    def _on_add_all_clicked(self):
+        paths = [b.resolved_path for b in self._badges if b.resolved_path]
+        if not paths:
+            return
+        self.add_all_requested.emit(list(paths))
+        # The query builder lives behind the modal; acknowledge inline.
+        self.add_all_btn.setText("Added ✓")
+        QTimer.singleShot(1500, self._restore_add_all_button)
+
+    @Slot()
+    def _restore_add_all_button(self):
+        try:
+            n = sum(1 for b in self._badges if b.resolved_path)
+            self.add_all_btn.setText(f"Add all resolved ({n})")
+        except RuntimeError:
+            pass  # dialog already closed
+
+    @Slot(str)
+    def _on_filter_changed(self, text: str):
+        needle = text.strip().lower()
+        for badge in self._badges:
+            badge.setVisible(not needle or needle in Path(badge.raw_filename).name.lower())
+
+    @Slot()
+    def _on_filter_accepted(self):
+        # Enter jumps to the first visible resolved badge.
+        for badge in self._badges:
+            if badge.isVisible() and badge.resolved_path:
+                self._on_badge_jump(badge.resolved_path)
+                return
+
+    @Slot(str)
+    def _on_badge_jump(self, filepath: str):
+        self.jump_requested.emit(filepath)
+        self.accept()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Focus the filter box so typing works immediately; PgUp/PgDn still
+        # reach the dialog handler (QLineEdit ignores them), arrows/Home/End
+        # edit text while the filter has focus.
+        QTimer.singleShot(0, self.filter_edit.setFocus)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        # Scroll the badge list; anything else keeps default dialog behavior
+        # (Escape closes, Enter/Space activates the focused button).
+        bar = self._scroll.verticalScrollBar()
+        key = event.key()
+        if key == Qt.Key.Key_Up:
+            bar.setValue(bar.value() - bar.singleStep())
+            event.accept()
+        elif key == Qt.Key.Key_Down:
+            bar.setValue(bar.value() + bar.singleStep())
+            event.accept()
+        elif key == Qt.Key.Key_PageUp:
+            bar.setValue(bar.value() - bar.pageStep())
+            event.accept()
+        elif key == Qt.Key.Key_PageDown:
+            bar.setValue(bar.value() + bar.pageStep())
+            event.accept()
+        elif key == Qt.Key.Key_Home:
+            bar.setValue(bar.minimum())
+            event.accept()
+        elif key == Qt.Key.Key_End:
+            bar.setValue(bar.maximum())
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def done(self, result: int):
+        for badge in self._badges:
+            badge.dispose()
+        self._badges = []
+        super().done(result)
+
 
 class CroppableLabel(QLabel):
     def __init__(self, parent=None):
@@ -129,7 +364,8 @@ class CroppableLabel(QLabel):
                 event.accept()
                 return
             else:
-                # Without Shift, clear existing selection and allow drag-n-drop
+                # Without Shift, clear existing selection and let the press
+                # bubble up (Ctrl+Left starts a file drag in the viewer).
                 self.clear_selection()
                 self._shift_pressed = False
                 event.ignore()
@@ -193,6 +429,7 @@ class SingleMediaViewer(QWidget):
     prev_requested = Signal()
     source_jump_requested = Signal(str)        # resolved filepath to navigate to
     source_add_query_requested = Signal(str)   # resolved filepath to stage in query builder
+    source_add_all_requested = Signal(list)    # all resolved filepaths to stage at once
 
     # Approximate nudge used only when the OpenCV grabber is unavailable.
     _FALLBACK_STEP_MS = 33
@@ -206,6 +443,8 @@ class SingleMediaViewer(QWidget):
         self._dup_count: int = 1
         self._metadata: ImageMetadata | None = None
         self._is_video = False
+        self._resolved_items: list = []  # last backend lineage results
+        self._more_btn: QPushButton | None = None  # overflow button, if shown
 
         # --- QtMultimedia pipeline (audio + video, single clock) ---
         self.player = QMediaPlayer(self)
@@ -273,9 +512,12 @@ class SingleMediaViewer(QWidget):
         self._tag_overlay.setVisible(False)
         self._tag_overlay.raise_()
 
-        # Info panel overlay — shows metadata
+        # Info panel overlay — shows metadata.
+        # NOTE: this container must NOT carry WA_TransparentForMouseEvents:
+        # the flag disables hit-testing for the whole subtree, which would
+        # make every child (source badges, buttons) unclickable. Only the
+        # static text label below is click-through.
         self._info_panel = QWidget(self.video_label)
-        self._info_panel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._info_panel.setVisible(False)
 
         info_panel_layout = QVBoxLayout(self._info_panel)
@@ -288,13 +530,35 @@ class SingleMediaViewer(QWidget):
         self._info_label.setStyleSheet(
             "color: #f0f0f0; font-size: 12px; background: transparent;"
         )
+        # Static text stays click-through so crop/drag gestures on the image
+        # underneath keep working; interactive children are unaffected.
+        self._info_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         info_panel_layout.addWidget(self._info_label)
 
-        # ComfyUI source lineage badges (populated async via set_resolved_sources)
+        # ComfyUI source lineage badges (populated async via set_resolved_sources).
+        # Header row: count label + always-available "show all" button so the
+        # dialog can be opened even when few enough sources fit inline.
+        self._sources_header_row = QWidget()
+        self._sources_header_row.setStyleSheet("border: none; background: transparent;")
+        header_row_layout = QHBoxLayout(self._sources_header_row)
+        header_row_layout.setContentsMargins(0, 0, 0, 0)
+        header_row_layout.setSpacing(6)
         self._sources_header = QLabel("Sources referenced by this workflow:")
         self._sources_header.setStyleSheet("border: none; color: #aaa; font-size: 11px;")
-        self._sources_header.setVisible(False)
-        info_panel_layout.addWidget(self._sources_header)
+        header_row_layout.addWidget(self._sources_header)
+        header_row_layout.addStretch(1)
+        self._sources_all_btn = QPushButton("⧉ all")
+        self._sources_all_btn.setFixedHeight(22)
+        self._sources_all_btn.setToolTip("Show all workflow sources")
+        self._sources_all_btn.setStyleSheet(
+            "color: #aaa; font-size: 11px; border: 1px solid #555; border-radius: 4px; padding: 1px 8px;"
+        )
+        self._sources_all_btn.clicked.connect(self._on_more_clicked)
+        # Same wheel-bubble problem as the overflow button (see eventFilter).
+        self._sources_all_btn.installEventFilter(self)
+        header_row_layout.addWidget(self._sources_all_btn)
+        self._sources_header_row.setVisible(False)
+        info_panel_layout.addWidget(self._sources_header_row)
 
         self._sources_container = QWidget()
         self._sources_container.setStyleSheet("border: none; background: transparent;")
@@ -305,6 +569,7 @@ class SingleMediaViewer(QWidget):
         self._info_panel.setStyleSheet(
             "background-color: rgba(10, 10, 10, 175); border-radius: 8px;"
         )
+        self._info_panel.raise_()
 
         # Duplicate count overlay
         self._dup_overlay = QLabel(self.video_label)
@@ -755,7 +1020,9 @@ class SingleMediaViewer(QWidget):
                 if isinstance(widget, SourceBadgeWidget):
                     widget.dispose()
                 widget.deleteLater()
-        self._sources_header.setVisible(False)
+        self._resolved_items = []
+        self._more_btn = None
+        self._sources_header_row.setVisible(False)
         self._sources_container.setVisible(False)
         self._reposition_overlays()
 
@@ -763,21 +1030,71 @@ class SingleMediaViewer(QWidget):
         """Render ComfyUI source badges from backend results.
 
         Each item: {"raw_filename": str, "resolved_path": str | None}.
-        Never dereferences a None path; unindexed files show a badge with
-        the recorded filename only.
+        The overlay stays compact no matter the graph size:
+        - resolved sources get up to INLINE_SOURCE_CAP small badges;
+        - unindexed names never get inline badges, only a count;
+        - anything beyond that collapses into a single overflow button
+          opening the full dialog.
+        When nothing resolved, the whole section is one summary line.
         """
         self.clear_sources()
-        if not resolved_items:
+        items = list(resolved_items or [])
+        self._resolved_items = items
+        if not items:
             return
-        for item in resolved_items:
-            raw = item.get("raw_filename", "?")
-            badge = SourceBadgeWidget(raw, item.get("resolved_path"), parent=self._sources_container)
+        resolved = [d for d in items if d.get("resolved_path")]
+        n_unindexed = len(items) - len(resolved)
+
+        for item in resolved[:INLINE_SOURCE_CAP]:
+            badge = SourceBadgeWidget(
+                item.get("raw_filename", "?"), item.get("resolved_path"),
+                parent=self._sources_container, compact=True,
+            )
             badge.jump_requested.connect(self.source_jump_requested.emit)
             badge.add_query_requested.connect(self.source_add_query_requested.emit)
             self._sources_layout.addWidget(badge)
-        self._sources_header.setVisible(True)
+
+        n_hidden = len(resolved) - min(len(resolved), INLINE_SOURCE_CAP) + n_unindexed
+        if n_hidden > 0:
+            if not resolved:
+                # Nothing actionable inline: one summary line for the section.
+                label = f"Sources ({len(items)}): none in library — show all"
+            else:
+                parts = []
+                n_hidden_resolved = len(resolved) - INLINE_SOURCE_CAP
+                if n_hidden_resolved > 0:
+                    parts.append(f"{n_hidden_resolved} more")
+                if n_unindexed > 0:
+                    parts.append(f"{n_unindexed} unindexed")
+                label = "+" + ", ".join(parts)
+            more_btn = QPushButton(label)
+            more_btn.setToolTip("Show all workflow sources")
+            more_btn.setStyleSheet(
+                "background-color: rgba(30, 30, 30, 200); color: #ddd;"
+                " border: 1px solid #444; border-radius: 6px; padding: 6px 10px;"
+            )
+            more_btn.clicked.connect(self._on_more_clicked)
+            # A button ignores wheel, which would otherwise bubble to the
+            # viewer and switch images; swallow them via event filter.
+            more_btn.installEventFilter(self)
+            self._more_btn = more_btn
+            self._sources_layout.addWidget(more_btn)
+        self._sources_header.setText(f"Sources ({len(items)}):")
+        self._sources_header_row.setVisible(True)
         self._sources_container.setVisible(True)
         self._reposition_overlays()
+
+    def _on_more_clicked(self):
+        """Open the overflow dialog with every resolved source."""
+        items = list(self._resolved_items or [])
+        if not items:
+            return
+        target = Path(self.current_filepath).name if self.current_filepath else "?"
+        dlg = SourceLineageDialog(target, items, self)
+        dlg.jump_requested.connect(self.source_jump_requested.emit)
+        dlg.add_query_requested.connect(self.source_add_query_requested.emit)
+        dlg.add_all_requested.connect(self.source_add_all_requested.emit)
+        dlg.exec()
 
     def _update_info_panel(self):
         if self._metadata is None:
@@ -807,6 +1124,7 @@ class SingleMediaViewer(QWidget):
             margin,
             self.video_label.height() - self._info_panel.height() - margin
         )
+        self._info_panel.raise_()
 
     def resizeEvent(self, event: QResizeEvent):
         # Redisplay current content scaled
@@ -859,8 +1177,23 @@ class SingleMediaViewer(QWidget):
             else:
                 self.next_requested.emit()
 
+    def eventFilter(self, watched, event):
+        # Swallow wheel over the overflow / show-all buttons (plain buttons
+        # ignore wheel, which would bubble to the viewer and switch images).
+        if event.type() == QEvent.Type.Wheel and watched in (self._more_btn, self._sources_all_btn):
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MouseButton.LeftButton and self.current_filepath:
+        # File drag requires Ctrl+Left: a plain left press starts drags far
+        # too eagerly and hijacks clicks meant for badges, crop selection,
+        # and other interactions on the view.
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.current_filepath
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
             drag = QDrag(self)
             mime_data = QMimeData()
             urls = [QUrl.fromLocalFile(self.current_filepath)]
@@ -873,6 +1206,9 @@ class SingleMediaViewer(QWidget):
                 drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
 
             drag.exec(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:

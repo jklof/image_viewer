@@ -276,6 +276,7 @@ class MainWindow(QMainWindow):
         self.single_image_view_widget.prev_requested.connect(self._navigate_prev)
         self.single_image_view_widget.source_jump_requested.connect(self._on_source_jump_requested)
         self.single_image_view_widget.source_add_query_requested.connect(self._on_source_add_query_requested)
+        self.single_image_view_widget.source_add_all_requested.connect(self._on_source_add_all_requested)
         self.visualizer_widget.image_selected.connect(self._on_visualizer_image_selected)
         self.random_order_btn.clicked.connect(self.random_order_triggered.emit)
         self.sort_by_date_btn.clicked.connect(self.sort_by_date_triggered.emit)
@@ -697,6 +698,18 @@ class MainWindow(QMainWindow):
         # safe at any time, including during sync.
         self.query_builder.add_image_element(filepath)
         self.update_status_bar(f"Added source '{Path(filepath).name}' to the query.")
+
+    @Slot(list)
+    def _on_source_add_all_requested(self, filepaths: list):
+        # Batch version from the lineage dialog; resolved paths only, one
+        # status update for the whole batch.
+        count = 0
+        for filepath in filepaths or []:
+            if filepath:
+                self.query_builder.add_image_element(filepath)
+                count += 1
+        if count:
+            self.update_status_bar(f"Added {count} source(s) to the query.")
 
     @Slot(QModelIndex, QModelIndex, list)
     def _on_model_data_changed(self, top_left, bottom_right, roles):
