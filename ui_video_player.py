@@ -472,21 +472,9 @@ class SingleMediaViewer(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(10, 0, 10, 0)
-        main_layout.setSpacing(10)
-
-        # Prev Button
-        prev_container_layout = QVBoxLayout()
-        prev_container_layout.addStretch(1)
-        self.prev_btn = NavThumbnail("prev", self)
-        self.prev_btn.clicked.connect(self.prev_requested.emit)
-        prev_container_layout.addWidget(self.prev_btn)
-        prev_container_layout.addStretch(1)
-        main_layout.addLayout(prev_container_layout)
-
-        # Center Container
-        center_layout = QVBoxLayout()
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(5)
 
         # --- Video/Image Display ---
         self.video_label = CroppableLabel()
@@ -495,6 +483,15 @@ class SingleMediaViewer(QWidget):
         self.video_label.setMinimumSize(200, 200)
         self.video_label.setStyleSheet("background-color: black;")
         self.video_label.setAcceptDrops(False)
+
+        # Floating Prev / Next Navigation Buttons (parented to video_label)
+        self.prev_btn = NavThumbnail("prev", parent=self.video_label)
+        self.prev_btn.clicked.connect(self.prev_requested.emit)
+        self.prev_btn.resized.connect(self._reposition_overlays)
+
+        self.next_btn = NavThumbnail("next", parent=self.video_label)
+        self.next_btn.clicked.connect(self.next_requested.emit)
+        self.next_btn.resized.connect(self._reposition_overlays)
 
         # Tag badge overlay — shown on top of video_label when image is tagged
         self._tag_overlay = QLabel("★", self.video_label)
@@ -584,7 +581,7 @@ class SingleMediaViewer(QWidget):
         self._dup_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._dup_overlay.setVisible(False)
 
-        center_layout.addWidget(self.video_label, 1)
+        main_layout.addWidget(self.video_label, 1)
 
         # --- Video Controls UI ---
         self.video_controls = QWidget()
@@ -638,19 +635,11 @@ class SingleMediaViewer(QWidget):
         controls_layout.addWidget(self.volume_slider)
         controls_layout.addWidget(self.extract_btn)
 
-        center_layout.addWidget(self.video_controls)
+        main_layout.addWidget(self.video_controls)
         self.video_controls.hide()
 
-        main_layout.addLayout(center_layout, 1)
-
-        # Next Button
-        next_container_layout = QVBoxLayout()
-        next_container_layout.addStretch(1)
-        self.next_btn = NavThumbnail("next", self)
-        self.next_btn.clicked.connect(self.next_requested.emit)
-        next_container_layout.addWidget(self.next_btn)
-        next_container_layout.addStretch(1)
-        main_layout.addLayout(next_container_layout)
+        # Reposition all overlays initially
+        self._reposition_overlays()
 
     def set_tag_state(self, is_tagged: bool):
         """Show or hide the tag badge overlay."""
@@ -672,6 +661,7 @@ class SingleMediaViewer(QWidget):
             self.video_label.setPixmap(QPixmap())
             self.video_controls.hide()
             self._info_panel.setVisible(False)
+            self._reposition_overlays()
             return
 
         self._is_video = current_path.lower().endswith(".mp4")
@@ -695,6 +685,9 @@ class SingleMediaViewer(QWidget):
             else:
                 self.video_label.setText("Could not load image.")
             self.video_label.clear_selection()  # Clear selection when loading new image
+
+        # Explicit reposition guarantees correct coordinates immediately upon media load
+        self._reposition_overlays()
 
     # --- Playback (QtMultimedia owns the A/V clock) ---
 
@@ -1126,8 +1119,21 @@ class SingleMediaViewer(QWidget):
         )
         self._info_panel.raise_()
 
+        # Floating Prev / Next Navigation Buttons
+        edge_margin = 12
+        center_y = self.video_label.height() // 2
+
+        if self.prev_btn.isVisible():
+            py = center_y - (self.prev_btn.height() // 2)
+            self.prev_btn.move(edge_margin, py)
+            self.prev_btn.raise_()
+
+        if self.next_btn.isVisible():
+            ny = center_y - (self.next_btn.height() // 2)
+            self.next_btn.move(self.video_label.width() - self.next_btn.width() - edge_margin, ny)
+            self.next_btn.raise_()
+
     def resizeEvent(self, event: QResizeEvent):
-        # Redisplay current content scaled
         if self.current_filepath and not self._is_video:
             if not self._cached_image_pixmap.isNull():
                 self._display_pixmap(self._cached_image_pixmap, is_video=False)
@@ -1136,13 +1142,6 @@ class SingleMediaViewer(QWidget):
             self._display_pixmap(pixmap, is_video=True)
 
         self._reposition_overlays()
-
-        target_height = int(self.height() * 0.25)
-        target_height = max(80, min(300, target_height))
-
-        self.prev_btn.setFixedHeight(target_height)
-        self.next_btn.setFixedHeight(target_height)
-
         super().resizeEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
